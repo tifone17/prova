@@ -97,7 +97,7 @@ class Config:
     ROLE_TRIAL_ID   = 1499048776588071095
 
     # ── DATABASE ──────────────────────────────────────────────────
-    DB_NAME         = "combined_bot.db"
+    DB_NAME         = "/data/combined_bot.db"
     DB_BUSY_TIMEOUT = 5000
 
     # ── CASINO ────────────────────────────────────────────────────
