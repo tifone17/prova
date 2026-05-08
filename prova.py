@@ -14,7 +14,7 @@ import uuid
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-import aiosqlite
+import asyncpg
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -58,7 +58,10 @@ def utcnow_naive() -> datetime.datetime:
 _TZ_OFFSET_RE = re.compile(r"[+-]\d{2}:?\d{2}$")
 
 
-def parse_naive(value: str) -> datetime.datetime:
+def parse_naive(value: str | datetime.datetime) -> datetime.datetime:
+    """Converte stringa ISO o datetime in datetime naive UTC."""
+    if isinstance(value, datetime.datetime):
+        return value.replace(tzinfo=None) if value.tzinfo is not None else value
     raw = value.strip().replace("T", " ")
     raw = raw.replace("Z", "").replace("+00:00", "").replace("+0000", "")
     raw = _TZ_OFFSET_RE.sub("", raw)
@@ -67,13 +70,18 @@ def parse_naive(value: str) -> datetime.datetime:
 
 
 # ══════════════════════════════════════════════════════════════════
-# CONFIG — modifica qui i tuoi ID
+# CONFIG
 # ══════════════════════════════════════════════════════════════════
 class Config:
 
     # ── TOKEN & GUILD ─────────────────────────────────────────────
     TOKEN    = os.environ.get("BOT_TOKEN", "")
     GUILD_ID = int(os.environ.get("GUILD_ID", "0"))
+
+    # ── DATABASE (PostgreSQL su Railway) ──────────────────────────
+    # Railway imposta automaticamente DATABASE_URL nel formato:
+    # postgresql://user:password@host:port/dbname
+    DATABASE_URL = os.environ.get("postgresql://postgres:wArgsqUcUSztHmvSEMEKVKyTrHhSsXaT@turntable.proxy.rlwy.net:36876/railway", "")
 
     # ── CANALI ────────────────────────────────────────────────────
     LOG_CHANNEL_ID         = 1493559866713964706
@@ -96,16 +104,12 @@ class Config:
     ROLE_ADMIN_ID   = 1499052316119273592
     ROLE_TRIAL_ID   = 1499048776588071095
 
-    # ── DATABASE ──────────────────────────────────────────────────
-    DB_NAME         = "/app/combined_bot.db"
-    DB_BUSY_TIMEOUT = 5000
-
     # ── CASINO ────────────────────────────────────────────────────
     STARTING_BALANCE    = 250
-    CASINO_COOLDOWN     = 3       # secondi tra una giocata e l'altra
+    CASINO_COOLDOWN     = 3
     DAILY_BONUS_MIN     = 50
     DAILY_BONUS_MAX     = 200
-    COINFLIP_WIN_CHANCE = 40      # percentuale vittoria coinflip
+    COINFLIP_WIN_CHANCE = 40
 
     COLOR_WIN    = 0x2ECC71
     COLOR_LOSE   = 0xE74C3C
@@ -117,7 +121,7 @@ class Config:
     MAX_OPEN_TICKETS = 2
     COOLDOWN_SECONDS = 30
     AUTO_CLOSE_HOURS = 48
-    CLOSE_DELAY      = 600        # secondi prima dell'eliminazione definitiva
+    CLOSE_DELAY      = 600
 
     CATEGORIE = [
         "Supporto Tecnico",
@@ -138,15 +142,20 @@ class Config:
 
     @classmethod
     def validate(cls) -> None:
-        if not cls.TOKEN or cls.TOKEN == "INSERISCI-QUI-IL-TUO-TOKEN":
+        if not cls.TOKEN:
             raise SystemExit(
                 "❌  TOKEN non configurato.\n"
-                "    Imposta la variabile d'ambiente BOT_TOKEN oppure modifica Config.TOKEN."
+                "    Imposta la variabile d'ambiente BOT_TOKEN."
             )
         if cls.GUILD_ID == 0:
             raise SystemExit(
                 "❌  GUILD_ID non configurato.\n"
-                "    Imposta la variabile d'ambiente GUILD_ID oppure modifica Config.GUILD_ID."
+                "    Imposta la variabile d'ambiente GUILD_ID."
+            )
+        if not cls.DATABASE_URL:
+            raise SystemExit(
+                "❌  DATABASE_URL non configurato.\n"
+                "    Su Railway: Variables → Add Reference → Postgres → DATABASE_URL."
             )
         optional_ids = [
             "LOG_CHANNEL_ID", "CATEGORY_GENERAL", "CATEGORY_MISSION_ID",
@@ -175,6 +184,9 @@ _giveaway_tasks_running: set[str]                = set()
 _ticket_close_tasks:     dict[int, asyncio.Task] = {}
 _afk_store:              dict[int, dict]         = {}
 
+# Pool globale asyncpg (inizializzato in setup_hook)
+_db_pool: Optional[asyncpg.Pool] = None
+
 
 def _get_giveaway_lock(g_id: str) -> asyncio.Lock:
     if g_id not in _giveaway_close_locks:
@@ -187,97 +199,122 @@ def _cleanup_giveaway_lock(g_id: str) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════
-# DATABASE — connessione con pragma WAL
+# DATABASE — Pool asyncpg
 # ══════════════════════════════════════════════════════════════════
-@contextlib.asynccontextmanager
-async def get_db():
-    async with aiosqlite.connect(Config.DB_NAME) as db:
-        await db.execute(f"PRAGMA busy_timeout = {Config.DB_BUSY_TIMEOUT}")
-        await db.execute("PRAGMA journal_mode = WAL")
-        await db.execute("PRAGMA foreign_keys = ON")
-        db.row_factory = aiosqlite.Row
-        yield db
+async def create_pool() -> asyncpg.Pool:
+    """Crea il pool di connessioni PostgreSQL."""
+    # Railway usa spesso SSL obbligatorio — ssl='require' è sicuro su tutti gli ambienti
+    pool = await asyncpg.create_pool(
+        Config.DATABASE_URL,
+        ssl="require",
+        min_size=2,
+        max_size=10,
+        command_timeout=30,
+    )
+    return pool
+
+
+def get_pool() -> asyncpg.Pool:
+    """Restituisce il pool globale (deve essere inizializzato prima)."""
+    if _db_pool is None:
+        raise RuntimeError("Pool del database non inizializzato.")
+    return _db_pool
+
+
+# ── Nota sulle differenze SQLite → PostgreSQL ─────────────────────
+# 1. I segnaposto cambiano: ? → $1, $2, $3, ...
+# 2. datetime('now') → NOW() oppure CURRENT_TIMESTAMP
+# 3. ON CONFLICT(...) DO UPDATE → uguale sintassi (UPSERT standard)
+# 4. INTEGER per Discord ID → BIGINT (gli ID Discord superano 2^31)
+# 5. aiosqlite.Row (dict-like) → asyncpg.Record (anche dict-like, .get() funziona)
+# 6. rowcount → il metodo execute() di asyncpg restituisce una stringa
+#    tipo "UPDATE 1"; si usa int(result.split()[-1]) per estrarre il conteggio.
+# 7. db.execute() restituisce il tag del comando, non un cursor.
+#    Per SELECT usare pool.fetch(), fetchrow(), fetchval().
+# ─────────────────────────────────────────────────────────────────
 
 
 async def init_db() -> None:
-    async with get_db() as db:
-        await db.executescript("""
+    """Crea tutte le tabelle (se non esistono) su PostgreSQL."""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS members (
-                discord_id INTEGER PRIMARY KEY,
-                mc_name    TEXT    NOT NULL UNIQUE,
-                added_by   INTEGER,
-                added_at   TEXT    DEFAULT (datetime('now'))
+                discord_id BIGINT PRIMARY KEY,
+                mc_name    TEXT   NOT NULL UNIQUE,
+                added_by   BIGINT,
+                added_at   TIMESTAMP DEFAULT NOW()
             );
 
             CREATE TABLE IF NOT EXISTS tickets (
-                channel_id   INTEGER PRIMARY KEY,
-                user_id      INTEGER NOT NULL,
+                channel_id   BIGINT PRIMARY KEY,
+                user_id      BIGINT NOT NULL,
                 categoria    TEXT,
                 priority     TEXT DEFAULT 'Bassa',
                 status       TEXT DEFAULT 'open',
-                opened_at    TEXT DEFAULT (datetime('now')),
-                last_message TEXT DEFAULT (datetime('now')),
-                claimed_by   INTEGER,
-                closed_by    INTEGER,
-                closed_at    TEXT
+                opened_at    TIMESTAMP DEFAULT NOW(),
+                last_message TIMESTAMP DEFAULT NOW(),
+                claimed_by   BIGINT,
+                closed_by    BIGINT,
+                closed_at    TIMESTAMP
             );
 
             CREATE TABLE IF NOT EXISTS blacklist (
-                user_id  INTEGER PRIMARY KEY,
+                user_id  BIGINT PRIMARY KEY,
                 reason   TEXT,
-                added_by INTEGER,
-                added_at TEXT DEFAULT (datetime('now'))
+                added_by BIGINT,
+                added_at TIMESTAMP DEFAULT NOW()
             );
 
             CREATE TABLE IF NOT EXISTS ticket_stats (
-                staff_id      INTEGER PRIMARY KEY,
+                staff_id      BIGINT PRIMARY KEY,
                 closed_count  INTEGER DEFAULT 0,
                 claimed_count INTEGER DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS cooldowns (
-                user_id   INTEGER PRIMARY KEY,
-                last_open TEXT
+                user_id   BIGINT PRIMARY KEY,
+                last_open TIMESTAMP
             );
 
             CREATE TABLE IF NOT EXISTS ratings (
-                channel_id INTEGER PRIMARY KEY,
-                user_id    INTEGER,
+                channel_id BIGINT PRIMARY KEY,
+                user_id    BIGINT,
                 score      INTEGER,
-                rated_at   TEXT DEFAULT (datetime('now'))
+                rated_at   TIMESTAMP DEFAULT NOW()
             );
 
             CREATE TABLE IF NOT EXISTS luck (
-                user_id INTEGER PRIMARY KEY,
+                user_id BIGINT PRIMARY KEY,
                 factor  INTEGER NOT NULL DEFAULT 1
             );
 
             CREATE TABLE IF NOT EXISTS giveaways (
-                id               TEXT PRIMARY KEY,
-                title            TEXT NOT NULL,
+                id               TEXT  PRIMARY KEY,
+                title            TEXT  NOT NULL,
                 description      TEXT,
-                channel_id       INTEGER NOT NULL,
-                message_id       INTEGER,
-                creator_id       INTEGER NOT NULL,
+                channel_id       BIGINT NOT NULL,
+                message_id       BIGINT,
+                creator_id       BIGINT NOT NULL,
                 prize            TEXT,
                 winners          INTEGER NOT NULL DEFAULT 1,
-                end_time         TEXT NOT NULL,
-                active           INTEGER NOT NULL DEFAULT 1,
-                required_role_id INTEGER DEFAULT NULL
+                end_time         TIMESTAMP NOT NULL,
+                active           BOOLEAN NOT NULL DEFAULT TRUE,
+                required_role_id BIGINT DEFAULT NULL
             );
 
             CREATE TABLE IF NOT EXISTS entries (
-                giveaway_id TEXT    NOT NULL REFERENCES giveaways(id) ON DELETE CASCADE,
-                user_id     INTEGER NOT NULL,
+                giveaway_id TEXT   NOT NULL REFERENCES giveaways(id) ON DELETE CASCADE,
+                user_id     BIGINT NOT NULL,
                 PRIMARY KEY (giveaway_id, user_id)
             );
 
             CREATE TABLE IF NOT EXISTS casino_users (
-                user_id     INTEGER PRIMARY KEY,
+                user_id     BIGINT PRIMARY KEY,
                 balance     INTEGER  DEFAULT 250,
                 bet         INTEGER  DEFAULT 10,
-                last_daily  TEXT,
-                last_play   TEXT,
+                last_daily  TIMESTAMP,
+                last_play   TIMESTAMP,
                 total_wins  INTEGER  DEFAULT 0,
                 total_games INTEGER  DEFAULT 0,
                 biggest_win INTEGER  DEFAULT 0
@@ -288,39 +325,39 @@ async def init_db() -> None:
                 reward     INTEGER NOT NULL,
                 max_uses   INTEGER NOT NULL DEFAULT 1,
                 uses       INTEGER NOT NULL DEFAULT 0,
-                expires_at TEXT,
-                created_by INTEGER NOT NULL,
-                active     INTEGER NOT NULL DEFAULT 1
+                expires_at TIMESTAMP,
+                created_by BIGINT NOT NULL,
+                active     BOOLEAN NOT NULL DEFAULT TRUE
             );
 
             CREATE TABLE IF NOT EXISTS promo_uses (
-                code    TEXT    NOT NULL REFERENCES promo_codes(code) ON DELETE CASCADE,
-                user_id INTEGER NOT NULL,
-                used_at TEXT    DEFAULT (datetime('now')),
+                code    TEXT   NOT NULL REFERENCES promo_codes(code) ON DELETE CASCADE,
+                user_id BIGINT NOT NULL,
+                used_at TIMESTAMP DEFAULT NOW(),
                 PRIMARY KEY (code, user_id)
             );
 
             CREATE TABLE IF NOT EXISTS polls (
                 id         TEXT PRIMARY KEY,
-                channel_id INTEGER NOT NULL,
-                message_id INTEGER,
+                channel_id BIGINT NOT NULL,
+                message_id BIGINT,
                 question   TEXT NOT NULL,
-                creator_id INTEGER NOT NULL,
-                created_at TEXT DEFAULT (datetime('now')),
-                active     INTEGER NOT NULL DEFAULT 1
+                creator_id BIGINT NOT NULL,
+                created_at TIMESTAMP DEFAULT NOW(),
+                active     BOOLEAN NOT NULL DEFAULT TRUE
             );
 
             CREATE TABLE IF NOT EXISTS poll_options (
-                id      INTEGER PRIMARY KEY AUTOINCREMENT,
-                poll_id TEXT    NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
-                label   TEXT    NOT NULL,
+                id      SERIAL PRIMARY KEY,
+                poll_id TEXT   NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
+                label   TEXT   NOT NULL,
                 votes   INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS poll_votes (
-                poll_id   TEXT    NOT NULL,
+                poll_id   TEXT   NOT NULL,
                 option_id INTEGER NOT NULL,
-                user_id   INTEGER NOT NULL,
+                user_id   BIGINT NOT NULL,
                 PRIMARY KEY (poll_id, user_id)
             );
 
@@ -329,53 +366,52 @@ async def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_entries_giveaway ON entries(giveaway_id);
             CREATE INDEX IF NOT EXISTS idx_giveaways_active ON giveaways(active, end_time);
         """)
-        await db.commit()
-    log.info("Database inizializzato: %s", Config.DB_NAME)
+    log.info("Database PostgreSQL inizializzato.")
 
 
 # ══════════════════════════════════════════════════════════════════
 # DB HELPERS — TEAM
 # ══════════════════════════════════════════════════════════════════
 async def db_upsert_member(discord_id: int, mc_name: str, added_by: int) -> None:
-    async with get_db() as db:
-        await db.execute(
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
             """
             INSERT INTO members (discord_id, mc_name, added_by)
-            VALUES (?, ?, ?)
+            VALUES ($1, $2, $3)
             ON CONFLICT(discord_id) DO UPDATE SET
-                mc_name  = excluded.mc_name,
-                added_by = excluded.added_by,
-                added_at = datetime('now')
+                mc_name  = EXCLUDED.mc_name,
+                added_by = EXCLUDED.added_by,
+                added_at = NOW()
             """,
-            (discord_id, mc_name, added_by),
+            discord_id, mc_name, added_by,
         )
-        await db.commit()
 
 
 async def db_delete_member(discord_id: int) -> bool:
-    async with get_db() as db:
-        cursor = await db.execute(
-            "DELETE FROM members WHERE discord_id = ?", (discord_id,)
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM members WHERE discord_id = $1", discord_id
         )
-        await db.commit()
-        return cursor.rowcount > 0
+    return result.split()[-1] != "0"
 
 
 async def db_get_all_members() -> list[tuple[int, str]]:
-    async with get_db() as db:
-        async with db.execute(
-            "SELECT discord_id, mc_name FROM members ORDER BY mc_name COLLATE NOCASE"
-        ) as cur:
-            rows = await cur.fetchall()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT discord_id, mc_name FROM members ORDER BY mc_name"
+        )
     return [(r["discord_id"], r["mc_name"]) for r in rows]
 
 
 async def db_find_by_mc(mc_name: str) -> Optional[int]:
-    async with get_db() as db:
-        async with db.execute(
-            "SELECT discord_id FROM members WHERE mc_name = ? COLLATE NOCASE", (mc_name,)
-        ) as cur:
-            row = await cur.fetchone()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT discord_id FROM members WHERE LOWER(mc_name) = LOWER($1)", mc_name
+        )
     return row["discord_id"] if row else None
 
 
@@ -383,29 +419,29 @@ async def db_find_by_mc(mc_name: str) -> Optional[int]:
 # DB HELPERS — TICKET
 # ══════════════════════════════════════════════════════════════════
 async def is_blacklisted(user_id: int) -> bool:
-    async with get_db() as db:
-        async with db.execute(
-            "SELECT 1 FROM blacklist WHERE user_id = ?", (user_id,)
-        ) as cur:
-            return await cur.fetchone() is not None
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT 1 FROM blacklist WHERE user_id = $1", user_id
+        )
+    return row is not None
 
 
 async def count_open_tickets(user_id: int) -> int:
-    async with get_db() as db:
-        async with db.execute(
-            "SELECT COUNT(*) AS cnt FROM tickets WHERE user_id = ? AND status = 'open'",
-            (user_id,),
-        ) as cur:
-            row = await cur.fetchone()
-    return row["cnt"] if row else 0
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        val = await conn.fetchval(
+            "SELECT COUNT(*) FROM tickets WHERE user_id = $1 AND status = 'open'", user_id
+        )
+    return val or 0
 
 
 async def check_cooldown(user_id: int) -> int:
-    async with get_db() as db:
-        async with db.execute(
-            "SELECT last_open FROM cooldowns WHERE user_id = ?", (user_id,)
-        ) as cur:
-            row = await cur.fetchone()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT last_open FROM cooldowns WHERE user_id = $1", user_id
+        )
     if not row:
         return 0
     try:
@@ -416,69 +452,72 @@ async def check_cooldown(user_id: int) -> int:
 
 
 async def update_cooldown(user_id: int) -> None:
-    async with get_db() as db:
-        await db.execute(
-            "INSERT INTO cooldowns (user_id, last_open) VALUES (?, datetime('now')) "
-            "ON CONFLICT(user_id) DO UPDATE SET last_open = datetime('now')",
-            (user_id,),
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO cooldowns (user_id, last_open) VALUES ($1, NOW())
+            ON CONFLICT(user_id) DO UPDATE SET last_open = NOW()
+            """,
+            user_id,
         )
-        await db.commit()
 
 
 async def get_ticket(channel_id: int) -> Optional[dict]:
-    async with get_db() as db:
-        async with db.execute(
-            "SELECT * FROM tickets WHERE channel_id = ?", (channel_id,)
-        ) as cur:
-            row = await cur.fetchone()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM tickets WHERE channel_id = $1", channel_id
+        )
     return dict(row) if row else None
 
 
 async def try_update_last_message(channel_id: int) -> None:
-    async with get_db() as db:
-        await db.execute(
-            "UPDATE tickets SET last_message = datetime('now') "
-            "WHERE channel_id = ? AND status = 'open'",
-            (channel_id,),
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE tickets SET last_message = NOW() WHERE channel_id = $1 AND status = 'open'",
+            channel_id,
         )
-        await db.commit()
 
 
 # ══════════════════════════════════════════════════════════════════
 # DB HELPERS — GIVEAWAY
 # ══════════════════════════════════════════════════════════════════
 async def db_get_luck(user_id: int) -> int:
-    async with get_db() as db:
-        async with db.execute(
-            "SELECT factor FROM luck WHERE user_id = ?", (user_id,)
-        ) as cur:
-            row = await cur.fetchone()
-    return row["factor"] if row else 1
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        val = await conn.fetchval(
+            "SELECT factor FROM luck WHERE user_id = $1", user_id
+        )
+    return val if val is not None else 1
 
 
 async def db_set_luck(user_id: int, factor: int) -> None:
-    async with get_db() as db:
-        await db.execute(
-            "INSERT INTO luck (user_id, factor) VALUES (?, ?) "
-            "ON CONFLICT(user_id) DO UPDATE SET factor = excluded.factor",
-            (user_id, factor),
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO luck (user_id, factor) VALUES ($1, $2)
+            ON CONFLICT(user_id) DO UPDATE SET factor = EXCLUDED.factor
+            """,
+            user_id, factor,
         )
-        await db.commit()
 
 
 async def db_get_entries_with_luck(g_id: str) -> list[tuple[int, int]]:
-    async with get_db() as db:
-        async with db.execute(
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
             """
             SELECT e.user_id, COALESCE(l.factor, 1) AS factor
             FROM entries e
             LEFT JOIN luck l ON l.user_id = e.user_id
-            WHERE e.giveaway_id = ?
+            WHERE e.giveaway_id = $1
             ORDER BY factor DESC, e.user_id
             """,
-            (g_id,),
-        ) as cur:
-            rows = await cur.fetchall()
+            g_id,
+        )
     return [(r["user_id"], r["factor"]) for r in rows]
 
 
@@ -494,91 +533,91 @@ async def db_create_giveaway(
 ) -> tuple[str, datetime.datetime]:
     g_id   = str(uuid.uuid4())
     end_dt = utcnow_naive() + datetime.timedelta(minutes=minutes)
-    async with get_db() as db:
-        await db.execute(
-            "INSERT INTO giveaways "
-            "(id, title, description, channel_id, creator_id, prize, winners, end_time, active, required_role_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
-            (g_id, title, description, channel_id, creator_id,
-             prize, winners, end_dt.isoformat(), required_role_id),
+    pool   = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO giveaways
+            (id, title, description, channel_id, creator_id, prize, winners, end_time, active, required_role_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE, $9)
+            """,
+            g_id, title, description, channel_id, creator_id,
+            prize, winners, end_dt, required_role_id,
         )
-        await db.commit()
     return g_id, end_dt
 
 
 async def db_set_message_id(g_id: str, message_id: int) -> None:
-    async with get_db() as db:
-        await db.execute(
-            "UPDATE giveaways SET message_id = ? WHERE id = ?", (message_id, g_id)
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE giveaways SET message_id = $1 WHERE id = $2", message_id, g_id
         )
-        await db.commit()
 
 
 async def db_get_giveaway(g_id: str) -> Optional[dict]:
-    async with get_db() as db:
-        async with db.execute(
-            "SELECT * FROM giveaways WHERE id = ?", (g_id,)
-        ) as cur:
-            row = await cur.fetchone()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM giveaways WHERE id = $1", g_id
+        )
     return dict(row) if row else None
 
 
 async def db_get_expired_giveaways() -> list[dict]:
-    async with get_db() as db:
-        async with db.execute(
-            "SELECT * FROM giveaways WHERE active = 1 AND end_time <= ?",
-            (utcnow_naive().isoformat(),),
-        ) as cur:
-            rows = await cur.fetchall()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM giveaways WHERE active = TRUE AND end_time <= NOW()"
+        )
     return [dict(r) for r in rows]
 
 
 async def db_close_giveaway(g_id: str) -> bool:
-    async with get_db() as db:
-        cur = await db.execute(
-            "UPDATE giveaways SET active = 0 WHERE id = ? AND active = 1", (g_id,)
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE giveaways SET active = FALSE WHERE id = $1 AND active = TRUE", g_id
         )
-        await db.commit()
-        return cur.rowcount > 0
+    return result.split()[-1] != "0"
 
 
 async def db_add_entry(g_id: str, user_id: int) -> bool:
+    pool = get_pool()
     try:
-        async with get_db() as db:
-            await db.execute(
-                "INSERT INTO entries (giveaway_id, user_id) VALUES (?, ?)", (g_id, user_id)
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO entries (giveaway_id, user_id) VALUES ($1, $2)", g_id, user_id
             )
-            await db.commit()
         return True
-    except aiosqlite.IntegrityError:
+    except asyncpg.UniqueViolationError:
         return False
 
 
 async def db_remove_entry(g_id: str, user_id: int) -> bool:
-    async with get_db() as db:
-        cur = await db.execute(
-            "DELETE FROM entries WHERE giveaway_id = ? AND user_id = ?", (g_id, user_id)
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM entries WHERE giveaway_id = $1 AND user_id = $2", g_id, user_id
         )
-        await db.commit()
-        return cur.rowcount > 0
+    return result.split()[-1] != "0"
 
 
 async def db_entry_count(g_id: str) -> int:
-    async with get_db() as db:
-        async with db.execute(
-            "SELECT COUNT(*) AS cnt FROM entries WHERE giveaway_id = ?", (g_id,)
-        ) as cur:
-            row = await cur.fetchone()
-    return row["cnt"] if row else 0
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        val = await conn.fetchval(
+            "SELECT COUNT(*) FROM entries WHERE giveaway_id = $1", g_id
+        )
+    return val or 0
 
 
 async def db_list_active_giveaways() -> list[dict]:
-    async with get_db() as db:
-        async with db.execute(
-            "SELECT id, title, end_time, winners FROM giveaways "
-            "WHERE active = 1 ORDER BY end_time"
-        ) as cur:
-            rows = await cur.fetchall()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, title, end_time, winners FROM giveaways WHERE active = TRUE ORDER BY end_time"
+        )
     return [dict(r) for r in rows]
 
 
@@ -586,58 +625,62 @@ async def db_list_active_giveaways() -> list[dict]:
 # DB HELPERS — CASINO
 # ══════════════════════════════════════════════════════════════════
 async def casino_get_user(user_id: int) -> dict:
-    async with get_db() as db:
-        await db.execute(
-            "INSERT OR IGNORE INTO casino_users(user_id) VALUES(?)", (user_id,)
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO casino_users(user_id) VALUES($1) ON CONFLICT DO NOTHING", user_id
         )
-        await db.commit()
-        async with db.execute(
-            "SELECT * FROM casino_users WHERE user_id = ?", (user_id,)
-        ) as cur:
-            row = await cur.fetchone()
+        row = await conn.fetchrow(
+            "SELECT * FROM casino_users WHERE user_id = $1", user_id
+        )
     return dict(row)
 
 
 async def casino_update_balance(user_id: int, delta: int) -> int:
-    async with get_db() as db:
-        await db.execute(
-            "INSERT OR IGNORE INTO casino_users(user_id) VALUES(?)", (user_id,)
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO casino_users(user_id) VALUES($1) ON CONFLICT DO NOTHING", user_id
         )
-        await db.execute(
-            "UPDATE casino_users SET balance = MAX(0, balance + ?) WHERE user_id = ?",
-            (delta, user_id),
+        val = await conn.fetchval(
+            """
+            UPDATE casino_users
+            SET balance = GREATEST(0, balance + $1)
+            WHERE user_id = $2
+            RETURNING balance
+            """,
+            delta, user_id,
         )
-        await db.commit()
-        async with db.execute(
-            "SELECT balance FROM casino_users WHERE user_id = ?", (user_id,)
-        ) as cur:
-            row = await cur.fetchone()
-    return row["balance"] if row else 0
+    return val or 0
 
 
 async def casino_record_game(user_id: int, won: bool, prize: int) -> None:
-    async with get_db() as db:
+    pool = get_pool()
+    async with pool.acquire() as conn:
         if won:
-            await db.execute(
-                "UPDATE casino_users SET total_wins = total_wins + 1, "
-                "total_games = total_games + 1, biggest_win = MAX(biggest_win, ?) "
-                "WHERE user_id = ?",
-                (prize, user_id),
+            await conn.execute(
+                """
+                UPDATE casino_users
+                SET total_wins  = total_wins + 1,
+                    total_games = total_games + 1,
+                    biggest_win = GREATEST(biggest_win, $1)
+                WHERE user_id = $2
+                """,
+                prize, user_id,
             )
         else:
-            await db.execute(
-                "UPDATE casino_users SET total_games = total_games + 1 WHERE user_id = ?",
-                (user_id,),
+            await conn.execute(
+                "UPDATE casino_users SET total_games = total_games + 1 WHERE user_id = $1",
+                user_id,
             )
-        await db.commit()
 
 
 async def casino_set_bet(user_id: int, bet: int) -> None:
-    async with get_db() as db:
-        await db.execute(
-            "UPDATE casino_users SET bet = ? WHERE user_id = ?", (bet, user_id)
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE casino_users SET bet = $1 WHERE user_id = $2", bet, user_id
         )
-        await db.commit()
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -645,58 +688,57 @@ async def casino_set_bet(user_id: int, bet: int) -> None:
 # ══════════════════════════════════════════════════════════════════
 async def db_create_promo(
     code: str, reward: int, max_uses: int,
-    expires_at: Optional[str], created_by: int,
+    expires_at: Optional[datetime.datetime], created_by: int,
 ) -> None:
-    async with get_db() as db:
-        await db.execute(
-            "INSERT INTO promo_codes (code, reward, max_uses, expires_at, created_by) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (code.upper(), reward, max_uses, expires_at, created_by),
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO promo_codes (code, reward, max_uses, expires_at, created_by)
+            VALUES ($1, $2, $3, $4, $5)
+            """,
+            code.upper(), reward, max_uses, expires_at, created_by,
         )
-        await db.commit()
 
 
 async def db_redeem_promo(code: str, user_id: int) -> tuple[bool, str, int]:
     """Restituisce (successo, messaggio, monete_premiate)."""
-    async with get_db() as db:
-        async with db.execute(
-            "SELECT * FROM promo_codes WHERE code = ? AND active = 1", (code.upper(),)
-        ) as cur:
-            row = await cur.fetchone()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT * FROM promo_codes WHERE code = $1 AND active = TRUE",
+                code.upper(),
+            )
 
-        if not row:
-            return False, "❌ Codice non valido o scaduto.", 0
+            if not row:
+                return False, "❌ Codice non valido o scaduto.", 0
 
-        if row["expires_at"]:
-            try:
-                if utcnow_naive() > parse_naive(row["expires_at"]):
-                    return False, "❌ Codice scaduto.", 0
-            except (ValueError, TypeError):
-                pass
+            if row["expires_at"] and utcnow_naive() > parse_naive(row["expires_at"]):
+                return False, "❌ Codice scaduto.", 0
 
-        if row["uses"] >= row["max_uses"]:
-            return False, "❌ Codice esaurito.", 0
+            if row["uses"] >= row["max_uses"]:
+                return False, "❌ Codice esaurito.", 0
 
-        async with db.execute(
-            "SELECT 1 FROM promo_uses WHERE code = ? AND user_id = ?",
-            (code.upper(), user_id),
-        ) as cur:
-            if await cur.fetchone():
+            already = await conn.fetchrow(
+                "SELECT 1 FROM promo_uses WHERE code = $1 AND user_id = $2",
+                code.upper(), user_id,
+            )
+            if already:
                 return False, "❌ Hai già riscattato questo codice.", 0
 
-        await db.execute(
-            "INSERT INTO promo_uses (code, user_id) VALUES (?, ?)",
-            (code.upper(), user_id),
-        )
-        new_uses = row["uses"] + 1
-        await db.execute(
-            "UPDATE promo_codes SET uses = ? WHERE code = ?", (new_uses, code.upper())
-        )
-        if new_uses >= row["max_uses"]:
-            await db.execute(
-                "UPDATE promo_codes SET active = 0 WHERE code = ?", (code.upper(),)
+            await conn.execute(
+                "INSERT INTO promo_uses (code, user_id) VALUES ($1, $2)",
+                code.upper(), user_id,
             )
-        await db.commit()
+            new_uses = row["uses"] + 1
+            await conn.execute(
+                "UPDATE promo_codes SET uses = $1 WHERE code = $2", new_uses, code.upper()
+            )
+            if new_uses >= row["max_uses"]:
+                await conn.execute(
+                    "UPDATE promo_codes SET active = FALSE WHERE code = $1", code.upper()
+                )
 
     return True, "✅ Codice riscattato!", row["reward"]
 
@@ -708,79 +750,80 @@ async def db_create_poll(
     question: str, options: list[str], channel_id: int, creator_id: int
 ) -> str:
     p_id = str(uuid.uuid4())
-    async with get_db() as db:
-        await db.execute(
-            "INSERT INTO polls (id, channel_id, question, creator_id) VALUES (?, ?, ?, ?)",
-            (p_id, channel_id, question, creator_id),
-        )
-        for opt in options:
-            await db.execute(
-                "INSERT INTO poll_options (poll_id, label) VALUES (?, ?)", (p_id, opt)
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "INSERT INTO polls (id, channel_id, question, creator_id) VALUES ($1, $2, $3, $4)",
+                p_id, channel_id, question, creator_id,
             )
-        await db.commit()
+            for opt in options:
+                await conn.execute(
+                    "INSERT INTO poll_options (poll_id, label) VALUES ($1, $2)", p_id, opt
+                )
     return p_id
 
 
 async def db_get_poll(p_id: str) -> Optional[dict]:
-    async with get_db() as db:
-        async with db.execute("SELECT * FROM polls WHERE id = ?", (p_id,)) as cur:
-            row = await cur.fetchone()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM polls WHERE id = $1", p_id)
     return dict(row) if row else None
 
 
 async def db_get_poll_options(p_id: str) -> list[dict]:
-    async with get_db() as db:
-        async with db.execute(
-            "SELECT * FROM poll_options WHERE poll_id = ? ORDER BY id", (p_id,)
-        ) as cur:
-            rows = await cur.fetchall()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM poll_options WHERE poll_id = $1 ORDER BY id", p_id
+        )
     return [dict(r) for r in rows]
 
 
 async def db_vote_poll(p_id: str, option_id: int, user_id: int) -> tuple[bool, str]:
-    async with get_db() as db:
-        async with db.execute(
-            "SELECT option_id FROM poll_votes WHERE poll_id = ? AND user_id = ?",
-            (p_id, user_id),
-        ) as cur:
-            existing = await cur.fetchone()
-
-        if existing:
-            if existing["option_id"] == option_id:
-                return False, "Hai già votato questa opzione."
-            await db.execute(
-                "UPDATE poll_options SET votes = votes - 1 WHERE id = ?",
-                (existing["option_id"],),
-            )
-            await db.execute(
-                "UPDATE poll_votes SET option_id = ? WHERE poll_id = ? AND user_id = ?",
-                (option_id, p_id, user_id),
-            )
-        else:
-            await db.execute(
-                "INSERT INTO poll_votes (poll_id, option_id, user_id) VALUES (?, ?, ?)",
-                (p_id, option_id, user_id),
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            existing = await conn.fetchrow(
+                "SELECT option_id FROM poll_votes WHERE poll_id = $1 AND user_id = $2",
+                p_id, user_id,
             )
 
-        await db.execute(
-            "UPDATE poll_options SET votes = votes + 1 WHERE id = ?", (option_id,)
-        )
-        await db.commit()
+            if existing:
+                if existing["option_id"] == option_id:
+                    return False, "Hai già votato questa opzione."
+                await conn.execute(
+                    "UPDATE poll_options SET votes = votes - 1 WHERE id = $1",
+                    existing["option_id"],
+                )
+                await conn.execute(
+                    "UPDATE poll_votes SET option_id = $1 WHERE poll_id = $2 AND user_id = $3",
+                    option_id, p_id, user_id,
+                )
+            else:
+                await conn.execute(
+                    "INSERT INTO poll_votes (poll_id, option_id, user_id) VALUES ($1, $2, $3)",
+                    p_id, option_id, user_id,
+                )
+
+            await conn.execute(
+                "UPDATE poll_options SET votes = votes + 1 WHERE id = $1", option_id
+            )
     return True, "Voto registrato."
 
 
 async def db_close_poll(p_id: str) -> None:
-    async with get_db() as db:
-        await db.execute("UPDATE polls SET active = 0 WHERE id = ?", (p_id,))
-        await db.commit()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE polls SET active = FALSE WHERE id = $1", p_id)
 
 
 async def db_set_poll_message(p_id: str, message_id: int) -> None:
-    async with get_db() as db:
-        await db.execute(
-            "UPDATE polls SET message_id = ? WHERE id = ?", (message_id, p_id)
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE polls SET message_id = $1 WHERE id = $2", message_id, p_id
         )
-        await db.commit()
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1030,18 +1073,19 @@ async def _do_archive_ticket(
 
     transcript_file = await build_transcript(channel)
 
-    async with get_db() as db:
-        await db.execute(
-            "INSERT INTO ticket_stats (staff_id, closed_count) VALUES (?, 1) "
-            "ON CONFLICT(staff_id) DO UPDATE SET closed_count = closed_count + 1",
-            (closer.id,),
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO ticket_stats (staff_id, closed_count) VALUES ($1, 1)
+            ON CONFLICT(staff_id) DO UPDATE SET closed_count = ticket_stats.closed_count + 1
+            """,
+            closer.id,
         )
-        await db.execute(
-            "UPDATE tickets SET status='closed', closed_by=?, closed_at=datetime('now') "
-            "WHERE channel_id=?",
-            (closer.id, channel.id),
+        await conn.execute(
+            "UPDATE tickets SET status='closed', closed_by=$1, closed_at=NOW() WHERE channel_id=$2",
+            closer.id, channel.id,
         )
-        await db.commit()
 
     owner = guild.get_member(ticket["user_id"])
     if owner:
@@ -1113,11 +1157,11 @@ async def close_ticket(
     if not ticket or ticket["status"] != "open":
         return
 
-    async with get_db() as db:
-        await db.execute(
-            "UPDATE tickets SET status='closing' WHERE channel_id=?", (channel.id,)
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE tickets SET status='closing' WHERE channel_id=$1", channel.id
         )
-        await db.commit()
 
     delay_min = Config.CLOSE_DELAY // 60
     embed = discord.Embed(
@@ -1169,11 +1213,11 @@ class ReopenView(discord.ui.View):
         if task and not task.done():
             task.cancel()
 
-        async with get_db() as db:
-            await db.execute(
-                "UPDATE tickets SET status='open' WHERE channel_id=?", (self.channel_id,)
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE tickets SET status='open' WHERE channel_id=$1", self.channel_id
             )
-            await db.commit()
 
         button.disabled = True
         button.label    = "✅ Riaperto"
@@ -1966,7 +2010,6 @@ class PartnershipReviewView(discord.ui.View):
                     color=0x2ECC71, timestamp=utcnow(),
                 )
             )
-        log.info("Partnership ACCETTATA: %s da %s", self.server_name, interaction.user)
         await asyncio.sleep(5)
         ticket = await get_ticket(self.channel.id)
         if ticket and ticket["status"] == "open":
@@ -2002,7 +2045,6 @@ class PartnershipReviewView(discord.ui.View):
                     color=0xE74C3C, timestamp=utcnow(),
                 )
             )
-        log.info("Partnership RIFIUTATA: %s da %s", self.server_name, interaction.user)
         await asyncio.sleep(3)
         ticket = await get_ticket(self.channel.id)
         if ticket and ticket["status"] == "open":
@@ -2063,12 +2105,16 @@ class RatingView(discord.ui.View):
 
     def _make_cb(self, score: int):
         async def cb(interaction: discord.Interaction):
-            async with get_db() as db:
-                await db.execute(
-                    "INSERT OR REPLACE INTO ratings (channel_id, user_id, score) VALUES (?, ?, ?)",
-                    (self.channel_id, self.user_id, score),
+            pool = get_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO ratings (channel_id, user_id, score)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT(channel_id) DO UPDATE SET score = EXCLUDED.score, rated_at = NOW()
+                    """,
+                    self.channel_id, self.user_id, score,
                 )
-                await db.commit()
             for item in self.children:
                 item.disabled = True
             await interaction.response.edit_message(
@@ -2227,12 +2273,12 @@ class TicketModal(discord.ui.Modal):
                 "Impossibile creare il canale. Riprova o contatta un admin.", ephemeral=True
             )
 
-        async with get_db() as db:
-            await db.execute(
-                "INSERT INTO tickets (channel_id, user_id, categoria, priority) VALUES (?, ?, ?, ?)",
-                (channel.id, user.id, self.categoria, self.priority),
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO tickets (channel_id, user_id, categoria, priority) VALUES ($1, $2, $3, $4)",
+                channel.id, user.id, self.categoria, self.priority,
             )
-            await db.commit()
 
         await update_cooldown(user.id)
 
@@ -2342,17 +2388,19 @@ class TicketAssignModal(discord.ui.Modal, title="📋 Assegna Ticket"):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         commento = self.commento_canale.value.strip() if self.commento_canale.value else ""
 
-        async with get_db() as db:
-            await db.execute(
-                "UPDATE tickets SET claimed_by = ? WHERE channel_id = ?",
-                (self.staff_member.id, interaction.channel.id),
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE tickets SET claimed_by = $1 WHERE channel_id = $2",
+                self.staff_member.id, interaction.channel.id,
             )
-            await db.execute(
-                "INSERT INTO ticket_stats (staff_id, claimed_count) VALUES (?, 1) "
-                "ON CONFLICT(staff_id) DO UPDATE SET claimed_count = claimed_count + 1",
-                (self.staff_member.id,),
+            await conn.execute(
+                """
+                INSERT INTO ticket_stats (staff_id, claimed_count) VALUES ($1, 1)
+                ON CONFLICT(staff_id) DO UPDATE SET claimed_count = ticket_stats.claimed_count + 1
+                """,
+                self.staff_member.id,
             )
-            await db.commit()
 
         with contextlib.suppress(discord.HTTPException):
             await interaction.channel.set_permissions(
@@ -2396,17 +2444,19 @@ class TicketControlView(discord.ui.View):
             return await interaction.response.send_message(
                 f"Ticket già in carico a <@{ticket['claimed_by']}>.", ephemeral=True
             )
-        async with get_db() as db:
-            await db.execute(
-                "UPDATE tickets SET claimed_by=? WHERE channel_id=?",
-                (interaction.user.id, interaction.channel.id),
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE tickets SET claimed_by=$1 WHERE channel_id=$2",
+                interaction.user.id, interaction.channel.id,
             )
-            await db.execute(
-                "INSERT INTO ticket_stats (staff_id, claimed_count) VALUES (?, 1) "
-                "ON CONFLICT(staff_id) DO UPDATE SET claimed_count=claimed_count+1",
-                (interaction.user.id,),
+            await conn.execute(
+                """
+                INSERT INTO ticket_stats (staff_id, claimed_count) VALUES ($1, 1)
+                ON CONFLICT(staff_id) DO UPDATE SET claimed_count = ticket_stats.claimed_count + 1
+                """,
+                interaction.user.id,
             )
-            await db.commit()
         button.disabled = True
         button.label    = f"In gestione da {interaction.user.display_name}"
         button.emoji    = None
@@ -2501,11 +2551,11 @@ class ChangePriorityView(discord.ui.View):
                 content="❌ Ticket già chiuso.", view=None
             )
         new_prio = interaction.data["values"][0]
-        async with get_db() as db:
-            await db.execute(
-                "UPDATE tickets SET priority=? WHERE channel_id=?", (new_prio, self.channel_id)
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE tickets SET priority=$1 WHERE channel_id=$2", new_prio, self.channel_id
             )
-            await db.commit()
         icon = Config.PRIORITY_ICONS.get(new_prio, "")
         await interaction.response.edit_message(
             content=f"Priorità aggiornata a **{icon} {new_prio}**", view=None
@@ -2722,11 +2772,11 @@ class GiveawayView(discord.ui.View):
                 return self.giveaway_id
 
         if interaction.message:
-            async with get_db() as db:
-                async with db.execute(
-                    "SELECT id FROM giveaways WHERE message_id = ?", (interaction.message.id,)
-                ) as cur:
-                    row = await cur.fetchone()
+            pool = get_pool()
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT id FROM giveaways WHERE message_id = $1", interaction.message.id
+                )
             if row:
                 self.giveaway_id = row["id"]
                 return self.giveaway_id
@@ -2916,12 +2966,15 @@ class TicketCog(commands.Cog):
     @ticket_staff_check()
     @app_commands.describe(utente="L'utente da bannare", motivo="Motivo")
     async def ticket_ban(self, interaction: discord.Interaction, utente: discord.Member, motivo: Optional[str] = "Nessun motivo specificato"):
-        async with get_db() as db:
-            await db.execute(
-                "INSERT OR REPLACE INTO blacklist (user_id, reason, added_by) VALUES (?, ?, ?)",
-                (utente.id, motivo, interaction.user.id),
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO blacklist (user_id, reason, added_by) VALUES ($1, $2, $3)
+                ON CONFLICT(user_id) DO UPDATE SET reason = EXCLUDED.reason, added_by = EXCLUDED.added_by
+                """,
+                utente.id, motivo, interaction.user.id,
             )
-            await db.commit()
         embed = discord.Embed(title="🚫 Aggiunto alla blacklist", color=0xE74C3C, timestamp=utcnow())
         embed.add_field(name="Utente",     value=utente.mention,          inline=True)
         embed.add_field(name="Aggiunto da", value=interaction.user.mention, inline=True)
@@ -2933,10 +2986,10 @@ class TicketCog(commands.Cog):
     @ticket_staff_check()
     @app_commands.describe(utente="L'utente da sbannare")
     async def ticket_unban(self, interaction: discord.Interaction, utente: discord.Member):
-        async with get_db() as db:
-            result  = await db.execute("DELETE FROM blacklist WHERE user_id = ?", (utente.id,))
-            removed = result.rowcount
-            await db.commit()
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            result = await conn.execute("DELETE FROM blacklist WHERE user_id = $1", utente.id)
+        removed = result.split()[-1] != "0"
         if removed:
             await interaction.response.send_message(f"✅ {utente.mention} rimosso dalla blacklist.")
         else:
@@ -2947,19 +3000,26 @@ class TicketCog(commands.Cog):
     @ticket_staff_check()
     @app_commands.describe(categoria="Filtra per categoria", priorita="Filtra per priorità")
     async def ticket_list(self, interaction: discord.Interaction, categoria: Optional[str] = None, priorita: Optional[str] = None):
-        query  = "SELECT channel_id, user_id, categoria, priority, opened_at, claimed_by FROM tickets WHERE status IN ('open', 'closing')"
+        # Costruiamo la query dinamicamente (asyncpg richiede $N per ogni parametro)
+        conditions = ["status IN ('open', 'closing')"]
         params: list = []
+        idx = 1
         if categoria:
-            query += " AND categoria=?"
+            conditions.append(f"categoria = ${idx}")
             params.append(categoria)
+            idx += 1
         if priorita:
-            query += " AND priority=?"
+            conditions.append(f"priority = ${idx}")
             params.append(priorita)
-        query += " ORDER BY opened_at"
+            idx += 1
+        query = (
+            "SELECT channel_id, user_id, categoria, priority, opened_at, claimed_by "
+            "FROM tickets WHERE " + " AND ".join(conditions) + " ORDER BY opened_at"
+        )
 
-        async with get_db() as db:
-            async with db.execute(query, params) as cur:
-                rows = await cur.fetchall()
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
 
         if not rows:
             return await interaction.response.send_message("Nessun ticket aperto.", ephemeral=True)
@@ -2967,9 +3027,10 @@ class TicketCog(commands.Cog):
         for row in rows[:20]:
             icon      = Config.PRIORITY_ICONS.get(row["priority"], "")
             claim_txt = f"In carico a <@{row['claimed_by']}>" if row["claimed_by"] else "Non assegnato"
+            opened_str = row["opened_at"].strftime("%Y-%m-%d %H:%M") if row["opened_at"] else "N/D"
             embed.add_field(
                 name=f"{icon} {row['priority']} | <#{row['channel_id']}>",
-                value=f"<@{row['user_id']}> • {row['categoria']}\n{row['opened_at'][:16]} • {claim_txt}",
+                value=f"<@{row['user_id']}> • {row['categoria']}\n{opened_str} • {claim_txt}",
                 inline=False,
             )
         if len(rows) > 20:
@@ -2988,21 +3049,20 @@ class TicketCog(commands.Cog):
     @app_commands.guild_only()
     @ticket_staff_check()
     async def ticket_stats(self, interaction: discord.Interaction):
-        async with get_db() as db:
-            async with db.execute(
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            staff_rows  = await conn.fetch(
                 "SELECT staff_id, closed_count, claimed_count FROM ticket_stats ORDER BY closed_count DESC LIMIT 10"
-            ) as cur:
-                staff_rows = await cur.fetchall()
-            async with db.execute("SELECT AVG(score), COUNT(*) FROM ratings") as cur:
-                rating_row = await cur.fetchone()
-            async with db.execute(
-                "SELECT COUNT(*) AS cnt FROM tickets WHERE status IN ('open', 'closing')"
-            ) as cur:
-                open_count = (await cur.fetchone())["cnt"]
-            async with db.execute("SELECT COUNT(*) AS cnt FROM tickets WHERE status='closed'") as cur:
-                closed_total = (await cur.fetchone())["cnt"]
+            )
+            rating_row  = await conn.fetchrow("SELECT AVG(score), COUNT(*) FROM ratings")
+            open_count  = await conn.fetchval(
+                "SELECT COUNT(*) FROM tickets WHERE status IN ('open', 'closing')"
+            )
+            closed_total = await conn.fetchval(
+                "SELECT COUNT(*) FROM tickets WHERE status = 'closed'"
+            )
 
-        avg_rating    = round(rating_row[0] or 0, 1)
+        avg_rating    = round(float(rating_row[0] or 0), 1)
         total_ratings = rating_row[1]
         embed = discord.Embed(title="📊 Statistiche Ticket", color=0xF39C12, timestamp=utcnow())
         embed.add_field(name="Ticket aperti",     value=str(open_count),   inline=True)
@@ -3060,17 +3120,19 @@ class TicketCog(commands.Cog):
             return await interaction.response.send_message(
                 f"Ticket già in carico a <@{ticket['claimed_by']}>.", ephemeral=True
             )
-        async with get_db() as db:
-            await db.execute(
-                "UPDATE tickets SET claimed_by=? WHERE channel_id=?",
-                (interaction.user.id, interaction.channel.id),
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE tickets SET claimed_by=$1 WHERE channel_id=$2",
+                interaction.user.id, interaction.channel.id,
             )
-            await db.execute(
-                "INSERT INTO ticket_stats (staff_id, claimed_count) VALUES (?, 1) "
-                "ON CONFLICT(staff_id) DO UPDATE SET claimed_count=claimed_count+1",
-                (interaction.user.id,),
+            await conn.execute(
+                """
+                INSERT INTO ticket_stats (staff_id, claimed_count) VALUES ($1, 1)
+                ON CONFLICT(staff_id) DO UPDATE SET claimed_count = ticket_stats.claimed_count + 1
+                """,
+                interaction.user.id,
             )
-            await db.commit()
         await interaction.response.send_message(
             embed=discord.Embed(
                 description=f"🙋 {interaction.user.mention} ha preso in carico questo ticket.",
@@ -3131,11 +3193,12 @@ class TicketCog(commands.Cog):
         icon  = Config.PRIORITY_ICONS.get(ticket["priority"], "")
         color = Config.PRIORITY_COLORS.get(ticket["priority"], 0x3498DB)
         embed = discord.Embed(title="📋 Info Ticket", color=color, timestamp=utcnow())
+        opened_str = ticket["opened_at"].strftime("%Y-%m-%d %H:%M") if ticket["opened_at"] else "N/D"
         embed.add_field(name="Utente",      value=f"<@{ticket['user_id']}>",                                              inline=True)
         embed.add_field(name="Categoria",   value=ticket["categoria"],                                                    inline=True)
         embed.add_field(name="Priorità",    value=f"{icon} {ticket['priority']}",                                         inline=True)
         embed.add_field(name="Stato",       value=ticket["status"].capitalize(),                                          inline=True)
-        embed.add_field(name="Aperto il",   value=ticket["opened_at"][:16],                                               inline=True)
+        embed.add_field(name="Aperto il",   value=opened_str,                                                             inline=True)
         embed.add_field(name="In carico a", value=f"<@{ticket['claimed_by']}>" if ticket["claimed_by"] else "Non assegnato", inline=True)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -3163,11 +3226,11 @@ class TicketCog(commands.Cog):
             )
         if not await get_ticket(interaction.channel.id):
             return await interaction.response.send_message("Questo canale non è un ticket.", ephemeral=True)
-        async with get_db() as db:
-            await db.execute(
-                "UPDATE tickets SET priority=? WHERE channel_id=?", (priorita, interaction.channel.id)
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE tickets SET priority=$1 WHERE channel_id=$2", priorita, interaction.channel.id
             )
-            await db.commit()
         icon  = Config.PRIORITY_ICONS.get(priorita, "")
         color = Config.PRIORITY_COLORS.get(priorita, 0xF39C12)
         await interaction.response.send_message(
@@ -3199,22 +3262,24 @@ class TicketCog(commands.Cog):
     async def auto_close_task(self):
         if Config.AUTO_CLOSE_HOURS <= 0:
             return
-        cutoff = (utcnow_naive() - datetime.timedelta(hours=Config.AUTO_CLOSE_HOURS)).isoformat()
-        async with get_db() as db:
-            async with db.execute(
-                "SELECT channel_id FROM tickets WHERE status='open' AND last_message<?", (cutoff,)
-            ) as cur:
-                rows = await cur.fetchall()
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT channel_id FROM tickets WHERE status='open' AND last_message < NOW() - INTERVAL '$1 hours'",
+            )
+            # asyncpg non supporta interpolazione diretta per INTERVAL, usiamo literal:
+            rows = await conn.fetch(
+                f"SELECT channel_id FROM tickets WHERE status='open' AND last_message < NOW() - INTERVAL '{Config.AUTO_CLOSE_HOURS} hours'"
+            )
         for row in rows:
             channel_id = row["channel_id"]
             channel    = self.bot.get_channel(channel_id)
             if channel is None:
-                async with get_db() as db:
-                    await db.execute(
-                        "UPDATE tickets SET status='closed', closed_at=datetime('now') WHERE channel_id=?",
-                        (channel_id,),
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE tickets SET status='closed', closed_at=NOW() WHERE channel_id=$1",
+                        channel_id,
                     )
-                    await db.commit()
                 continue
             try:
                 await channel.send(
@@ -3372,11 +3437,11 @@ class GiveawayCog(commands.Cog):
         g = await db_get_giveaway(partial_id)
         if g:
             return g
-        async with get_db() as db:
-            async with db.execute(
-                "SELECT * FROM giveaways WHERE id LIKE ? LIMIT 2", (f"{partial_id}%",)
-            ) as cur:
-                rows = await cur.fetchall()
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM giveaways WHERE id LIKE $1 LIMIT 2", f"{partial_id}%"
+            )
         return dict(rows[0]) if len(rows) == 1 else None
 
     @app_commands.command(name="giveaway_crea", description="[Staff Giveaway] Crea un nuovo giveaway")
@@ -3396,11 +3461,11 @@ class GiveawayCog(commands.Cog):
         if not g["active"]:
             return await interaction.response.send_message("❌ Giveaway già terminato.", ephemeral=True)
         role_id = ruolo.id if ruolo else None
-        async with get_db() as db:
-            await db.execute(
-                "UPDATE giveaways SET required_role_id = ? WHERE id = ?", (role_id, g["id"])
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE giveaways SET required_role_id = $1 WHERE id = $2", role_id, g["id"]
             )
-            await db.commit()
         count = await db_entry_count(g["id"])
         await refresh_giveaway_embed(interaction.client, g["id"], count)
         msg = f"✅ Ruolo richiesto: {ruolo.mention}" if ruolo else "✅ Requisito rimosso."
@@ -3533,9 +3598,6 @@ class CasinoCog(commands.Cog):
                 pass
 
         balance_after = await casino_update_balance(uid, -bet)
-        if balance_after != data["balance"] - bet:
-            return await interaction.response.send_message("❌ Saldo insufficiente.", ephemeral=True)
-
         loading = base_embed("🎰 Girando...", Config.COLOR_INFO, interaction.user)
         loading.description = "❔ | ❔ | ❔"
         await interaction.response.send_message(embed=loading)
@@ -3571,12 +3633,12 @@ class CasinoCog(commands.Cog):
             )
 
         await casino_record_game(uid, won, prize)
-        async with get_db() as db:
-            await db.execute(
-                "UPDATE casino_users SET last_play = ?, bet = ? WHERE user_id = ?",
-                (utcnow_naive().isoformat(), bet, uid),
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE casino_users SET last_play = NOW(), bet = $1 WHERE user_id = $2",
+                bet, uid,
             )
-            await db.commit()
 
         with contextlib.suppress(discord.HTTPException):
             await msg.edit(embed=embed)
@@ -3715,12 +3777,11 @@ class CasinoCog(commands.Cog):
 
         reward  = random.randint(Config.DAILY_BONUS_MIN, Config.DAILY_BONUS_MAX)
         new_bal = await casino_update_balance(uid, reward)
-        async with get_db() as db:
-            await db.execute(
-                "UPDATE casino_users SET last_daily = ? WHERE user_id = ?",
-                (utcnow_naive().isoformat(), uid),
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE casino_users SET last_daily = NOW() WHERE user_id = $1", uid
             )
-            await db.commit()
 
         embed = base_embed("🎁 Bonus Giornaliero", Config.COLOR_GOLD, interaction.user)
         embed.description = (
@@ -3755,11 +3816,11 @@ class CasinoCog(commands.Cog):
     @casino_access_check()
     async def leaderboard_cmd(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        async with get_db() as db:
-            async with db.execute(
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
                 "SELECT user_id, balance, total_wins, total_games FROM casino_users ORDER BY balance DESC LIMIT 10"
-            ) as cur:
-                rows = await cur.fetchall()
+            )
 
         async def _fetch_name(user_id: int) -> str:
             try:
@@ -3838,13 +3899,13 @@ class CasinoCog(commands.Cog):
             random.choices(string.ascii_uppercase + string.digits, k=8)
         )
         max_uses   = usi if usi > 0 else 999_999_999
-        expires_at = None
+        expires_dt: Optional[datetime.datetime] = None
         if scadenza > 0:
-            expires_at = (utcnow_naive() + datetime.timedelta(hours=scadenza)).isoformat()
+            expires_dt = utcnow_naive() + datetime.timedelta(hours=scadenza)
 
         try:
-            await db_create_promo(final_code, monete, max_uses, expires_at, interaction.user.id)
-        except aiosqlite.IntegrityError:
+            await db_create_promo(final_code, monete, max_uses, expires_dt, interaction.user.id)
+        except asyncpg.UniqueViolationError:
             return await interaction.response.send_message(
                 f"❌ Il codice `{final_code}` esiste già.", ephemeral=True
             )
@@ -3885,13 +3946,17 @@ class CasinoCog(commands.Cog):
     @app_commands.guild_only()
     @casino_staff_check()
     async def resetuser_cmd(self, interaction: discord.Interaction, utente: discord.User):
-        async with get_db() as db:
-            await db.execute(
-                "UPDATE casino_users SET balance=?, bet=10, last_daily=NULL, last_play=NULL, "
-                "total_wins=0, total_games=0, biggest_win=0 WHERE user_id=?",
-                (Config.STARTING_BALANCE, utente.id),
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE casino_users
+                SET balance=$1, bet=10, last_daily=NULL, last_play=NULL,
+                    total_wins=0, total_games=0, biggest_win=0
+                WHERE user_id=$2
+                """,
+                Config.STARTING_BALANCE, utente.id,
             )
-            await db.commit()
         embed = base_embed("🔄 Account Resettato", Config.COLOR_INFO, interaction.user)
         embed.description = f"Account di {utente.mention} resettato a {coin(Config.STARTING_BALANCE)}."
         await interaction.response.send_message(embed=embed)
@@ -3983,11 +4048,11 @@ class PollCog(commands.Cog):
     @app_commands.guild_only()
     @ticket_staff_check()
     async def chiudi_sondaggio_cmd(self, interaction: discord.Interaction, poll_id: str):
-        async with get_db() as db:
-            async with db.execute(
-                "SELECT * FROM polls WHERE id LIKE ? AND active = 1 LIMIT 2", (f"{poll_id}%",)
-            ) as cur:
-                rows = await cur.fetchall()
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM polls WHERE id LIKE $1 AND active = TRUE LIMIT 2", f"{poll_id}%"
+            )
 
         if not rows:
             return await interaction.response.send_message(
@@ -4263,16 +4328,22 @@ class CombinedBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self) -> None:
+        global _db_pool
         Config.validate()
+
+        # ── Crea il pool PostgreSQL ────────────────────────────────
+        _db_pool = await create_pool()
+        log.info("Pool PostgreSQL creato.")
         await init_db()
 
-        # Registra le view persistenti (sopravvivono ai restart)
+        # ── View persistenti ──────────────────────────────────────
         self.add_view(TicketControlView())
         self.add_view(MainPersistentView())
         self.add_view(GiveawayView(None))
         self.add_view(MissionView())
         self.add_view(MissionControl())
 
+        # ── Cog ───────────────────────────────────────────────────
         await self.add_cog(TeamCog(self))
         await self.add_cog(TicketCog(self))
         await self.add_cog(GiveawayCog(self))
@@ -4296,9 +4367,9 @@ class CombinedBot(commands.Bot):
             )
         )
         # Ripristina ticket "closing" interrotti dal restart
-        async with get_db() as db:
-            await db.execute("UPDATE tickets SET status='open' WHERE status='closing'")
-            await db.commit()
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("UPDATE tickets SET status='open' WHERE status='closing'")
         log.info("Ticket 'closing' ripristinati a 'open' dopo il restart.")
 
     async def on_message(self, message: discord.Message) -> None:
@@ -4338,6 +4409,10 @@ class CombinedBot(commands.Bot):
         for task in list(_ticket_close_tasks.values()):
             if not task.done():
                 task.cancel()
+        # Chiude il pool PostgreSQL in modo pulito
+        if _db_pool:
+            await _db_pool.close()
+            log.info("Pool PostgreSQL chiuso.")
         await super().close()
 
 
