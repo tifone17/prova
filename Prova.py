@@ -81,7 +81,7 @@ class Config:
     # ── DATABASE (PostgreSQL su Railway) ──────────────────────────
     # Railway imposta automaticamente DATABASE_URL nel formato:
     # postgresql://user:password@host:port/dbname
-    DATABASE_URL = os.environ.get("postgresql://postgres:wArgsqUcUSztHmvSEMEKVKyTrHhSsXaT@turntable.proxy.rlwy.net:36876/railway", "")
+    DATABASE_URL = os.environ.get("postgresql://postgres:wArgsqUcUSztHmvSEMEKVKyTrHhSsXaT@postgres.railway.internal:5432/railway", "")
 
     # ── CANALI ────────────────────────────────────────────────────
     LOG_CHANNEL_ID         = 1493559866713964706
