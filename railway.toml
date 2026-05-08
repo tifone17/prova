@@ -2,5 +2,5 @@
 builder = "nixpacks"
 
 [deploy]
-startCommand = "python prova.py"
+startCommand = "python Prova.py"
 restartPolicyType = "always"
