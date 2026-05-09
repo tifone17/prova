@@ -79,8 +79,6 @@ class Config:
     GUILD_ID = int(os.environ.get("GUILD_ID", "0"))
 
     # ── DATABASE (PostgreSQL su Railway) ──────────────────────────
-    # Railway imposta automaticamente DATABASE_URL nel formato:
-    # postgresql://user:password@host:port/dbname
     DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
     # ── CANALI ────────────────────────────────────────────────────
@@ -203,7 +201,6 @@ def _cleanup_giveaway_lock(g_id: str) -> None:
 # ══════════════════════════════════════════════════════════════════
 async def create_pool() -> asyncpg.Pool:
     """Crea il pool di connessioni PostgreSQL."""
-    # Railway usa spesso SSL obbligatorio — ssl='require' è sicuro su tutti gli ambienti
     pool = await asyncpg.create_pool(
         Config.DATABASE_URL,
         ssl="require",
@@ -219,19 +216,6 @@ def get_pool() -> asyncpg.Pool:
     if _db_pool is None:
         raise RuntimeError("Pool del database non inizializzato.")
     return _db_pool
-
-
-# ── Nota sulle differenze SQLite → PostgreSQL ─────────────────────
-# 1. I segnaposto cambiano: ? → $1, $2, $3, ...
-# 2. datetime('now') → NOW() oppure CURRENT_TIMESTAMP
-# 3. ON CONFLICT(...) DO UPDATE → uguale sintassi (UPSERT standard)
-# 4. INTEGER per Discord ID → BIGINT (gli ID Discord superano 2^31)
-# 5. aiosqlite.Row (dict-like) → asyncpg.Record (anche dict-like, .get() funziona)
-# 6. rowcount → il metodo execute() di asyncpg restituisce una stringa
-#    tipo "UPDATE 1"; si usa int(result.split()[-1]) per estrarre il conteggio.
-# 7. db.execute() restituisce il tag del comando, non un cursor.
-#    Per SELECT usare pool.fetch(), fetchrow(), fetchval().
-# ─────────────────────────────────────────────────────────────────
 
 
 async def init_db() -> None:
@@ -1449,6 +1433,8 @@ class MissionView(discord.ui.View):
         priv_embed.add_field(name="💰 Premio",    value=premio,    inline=True)
         priv_embed.set_footer(text=f"Accettata da {interaction.user}")
 
+        # ── [MODIFICA 1] Ping utente + staff nel messaggio del canale missione ──
+        # Uguale all'immagine: "@utente | @StaffRole"
         content_parts = [interaction.user.mention]
         if staff_role:
             content_parts.append(staff_role.mention)
@@ -2293,13 +2279,27 @@ class TicketModal(discord.ui.Modal):
         embed.add_field(name="Descrizione",    value=self.descrizione.value,    inline=False)
         embed.set_footer(text=f"User ID: {user.id}")
 
+        # ══════════════════════════════════════════════════════════
+        # [MODIFICA 1] PING STAFF NELL'APERTURA TICKET
+        # Formato uguale all'immagine: "@utente | @StaffRole"
+        # ══════════════════════════════════════════════════════════
+        ping_parts = [user.mention]
+        if staff_role:
+            ping_parts.append(staff_role.mention)
+
         await channel.send(
-            content=f"Benvenuto {user.mention}! Lo staff ti risponderà a breve.",
+            content=" | ".join(ping_parts),
             embed=embed,
             view=TicketControlView(),
+            allowed_mentions=discord.AllowedMentions(users=True, roles=True),
         )
+
+        # Per i ticket Urgenti, invia un secondo messaggio di allerta
         if self.priority == "Urgente" and staff_role:
-            await channel.send(f"{staff_role.mention} — ticket **URGENTE**!")
+            await channel.send(
+                f"🚨 {staff_role.mention} — ticket **URGENTE** da gestire immediatamente!",
+                allowed_mentions=discord.AllowedMentions(roles=True),
+            )
 
         if self.categoria == "Candidatura Staff":
             await channel.send(
@@ -3000,7 +3000,6 @@ class TicketCog(commands.Cog):
     @ticket_staff_check()
     @app_commands.describe(categoria="Filtra per categoria", priorita="Filtra per priorità")
     async def ticket_list(self, interaction: discord.Interaction, categoria: Optional[str] = None, priorita: Optional[str] = None):
-        # Costruiamo la query dinamicamente (asyncpg richiede $N per ogni parametro)
         conditions = ["status IN ('open', 'closing')"]
         params: list = []
         idx = 1
@@ -3264,10 +3263,6 @@ class TicketCog(commands.Cog):
             return
         pool = get_pool()
         async with pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT channel_id FROM tickets WHERE status='open' AND last_message < NOW() - INTERVAL '$1 hours'",
-            )
-            # asyncpg non supporta interpolazione diretta per INTERVAL, usiamo literal:
             rows = await conn.fetch(
                 f"SELECT channel_id FROM tickets WHERE status='open' AND last_message < NOW() - INTERVAL '{Config.AUTO_CLOSE_HOURS} hours'"
             )
@@ -3917,6 +3912,91 @@ class CasinoCog(commands.Cog):
         embed.add_field(name="Scade",   value=f"Tra {scadenza}h" if scadenza > 0 else "Mai", inline=True)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    # ══════════════════════════════════════════════════════════════
+    # [MODIFICA 2] /casino_lista_codici — Vedi tutti i codici attivi
+    # Solo per Staff Casino
+    # ══════════════════════════════════════════════════════════════
+    @app_commands.command(
+        name="casino_lista_codici",
+        description="[Staff Casino] Visualizza tutti i codici promozionali attivi",
+    )
+    @app_commands.guild_only()
+    @casino_staff_check()
+    async def lista_codici_cmd(self, interaction: discord.Interaction):
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT code, reward, uses, max_uses, expires_at, created_by, active
+                FROM promo_codes
+                ORDER BY active DESC, code
+                LIMIT 50
+                """
+            )
+
+        if not rows:
+            return await interaction.response.send_message(
+                "📭 Nessun codice promozionale nel database.", ephemeral=True
+            )
+
+        # Paginiamo in embed (max 10 per pagina)
+        PAGE = 10
+        pages: list[discord.Embed] = []
+        chunks = [rows[i:i+PAGE] for i in range(0, len(rows), PAGE)]
+
+        now = utcnow_naive()
+
+        for idx, chunk in enumerate(chunks):
+            embed = discord.Embed(
+                title="🎟️ Codici Promozionali",
+                color=Config.COLOR_GOLD,
+                timestamp=utcnow(),
+            )
+            embed.set_footer(text=f"Pagina {idx+1}/{len(chunks)} • Totale: {len(rows)} codici")
+
+            for row in chunk:
+                stato = "✅ Attivo" if row["active"] else "❌ Esaurito/Disattivato"
+
+                # Scadenza
+                if row["expires_at"]:
+                    exp_naive = parse_naive(row["expires_at"])
+                    if now > exp_naive:
+                        scad_text = "⏰ Scaduto"
+                    else:
+                        delta = exp_naive - now
+                        h, rem = divmod(int(delta.total_seconds()), 3600)
+                        scad_text = f"Scade tra {h}h {rem//60}m"
+                else:
+                    scad_text = "Nessuna scadenza"
+
+                # Usi rimanenti
+                max_u = row["max_uses"]
+                remaining_uses = (
+                    "Illimitato" if max_u >= 999_999_999
+                    else f"{row['uses']}/{max_u} usati"
+                )
+
+                embed.add_field(
+                    name=f"`{row['code']}` — {coin(row['reward'])}",
+                    value=(
+                        f"**Stato:** {stato}\n"
+                        f"**Usi:** {remaining_uses}\n"
+                        f"**Scadenza:** {scad_text}\n"
+                        f"**Creato da:** <@{row['created_by']}>"
+                    ),
+                    inline=True,
+                )
+            pages.append(embed)
+
+        # Se c'è una sola pagina, manda direttamente
+        if len(pages) == 1:
+            return await interaction.response.send_message(embed=pages[0], ephemeral=True)
+
+        # Navigazione multi-pagina
+        view = PromoCodesPageView(pages, interaction.user)
+        await interaction.response.send_message(embed=pages[0], view=view, ephemeral=True)
+        view._message = await interaction.original_response()
+
     @app_commands.command(name="casino_addcoins", description="[Staff Casino] Aggiungi monete a un utente")
     @app_commands.describe(utente="Utente target", importo="Quantità")
     @app_commands.guild_only()
@@ -4004,6 +4084,52 @@ class CasinoCog(commands.Cog):
             await interaction.response.send_message(embed=embed)
         else:
             await interaction.response.send_message(f"❌ Errore: {err}", ephemeral=True)
+
+
+# ══════════════════════════════════════════════════════════════════
+# [MODIFICA 2] View paginazione per lista codici promo
+# ══════════════════════════════════════════════════════════════════
+class PromoCodesPageView(discord.ui.View):
+    def __init__(self, pages: list[discord.Embed], invoker: discord.User | discord.Member):
+        super().__init__(timeout=120)
+        self.pages   = pages
+        self.invoker = invoker
+        self.page    = 0
+        self._message: Optional[discord.Message] = None
+        self._update_buttons()
+
+    def _update_buttons(self) -> None:
+        self.prev_btn.disabled = self.page == 0
+        self.next_btn.disabled = self.page >= len(self.pages) - 1
+
+    async def _check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.invoker.id:
+            await interaction.response.send_message("❌ Non puoi navigare questa lista.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="◀ Precedente", style=discord.ButtonStyle.secondary)
+    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check(interaction):
+            return
+        self.page -= 1
+        self._update_buttons()
+        await interaction.response.edit_message(embed=self.pages[self.page], view=self)
+
+    @discord.ui.button(label="Successivo ▶", style=discord.ButtonStyle.secondary)
+    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check(interaction):
+            return
+        self.page += 1
+        self._update_buttons()
+        await interaction.response.edit_message(embed=self.pages[self.page], view=self)
+
+    async def on_timeout(self) -> None:
+        for item in self.children:
+            item.disabled = True  # type: ignore[attr-defined]
+        if self._message:
+            with contextlib.suppress(discord.HTTPException):
+                await self._message.edit(view=self)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -4152,6 +4278,90 @@ class AfkCog(commands.Cog):
 
 
 # ══════════════════════════════════════════════════════════════════
+# [MODIFICA 3] COG — COMUNICAZIONI (webhook, scrive come un utente)
+# ══════════════════════════════════════════════════════════════════
+class ComunicazioniCog(commands.Cog):
+    """
+    Il comando /comunicazioni usa un Webhook per inviare il messaggio
+    con il nome e l'avatar del membro che esegue il comando,
+    esattamente come se fosse lui a scrivere nel canale — senza embed,
+    senza tag "[APP]", senza nome del bot.
+
+    Requisiti permessi bot: Manage Webhooks
+    """
+
+    def __init__(self, bot: "CombinedBot"):
+        self.bot = bot
+
+    async def _get_or_create_webhook(
+        self, channel: discord.TextChannel
+    ) -> discord.Webhook:
+        """Trova (o crea) un webhook del bot nel canale target."""
+        existing = await channel.webhooks()
+        for wh in existing:
+            if wh.user and wh.user.id == self.bot.user.id:
+                return wh
+        return await channel.create_webhook(
+            name="ComunicazioniBot",
+            reason="Webhook per /comunicazioni",
+        )
+
+    @app_commands.command(
+        name="comunicazioni",
+        description="[Staff] Scrivi nel canale come se fossi tu (nessun embed, nessun tag bot)",
+    )
+    @app_commands.describe(
+        messaggio="Il testo da inviare",
+        canale="Canale destinazione (lascia vuoto = canale corrente)",
+    )
+    @app_commands.guild_only()
+    @ticket_staff_check()
+    async def comunicazioni_cmd(
+        self,
+        interaction: discord.Interaction,
+        messaggio: str,
+        canale: Optional[discord.TextChannel] = None,
+    ) -> None:
+        target = canale or interaction.channel
+
+        # Verifica permessi bot nel canale di destinazione
+        perms = target.permissions_for(interaction.guild.me)
+        if not perms.manage_webhooks:
+            return await interaction.response.send_message(
+                f"❌ Non ho il permesso **Gestisci Webhook** in {target.mention}.\n"
+                "Aggiungilo dalle impostazioni del canale e riprova.",
+                ephemeral=True,
+            )
+
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            webhook = await self._get_or_create_webhook(target)
+        except discord.Forbidden:
+            return await interaction.followup.send(
+                "❌ Impossibile creare il webhook. Controlla i permessi del bot.", ephemeral=True
+            )
+
+        member = interaction.user  # sempre discord.Member in guild_only
+
+        # Invia il messaggio esattamente come se fosse l'utente a scriverlo:
+        # username = display_name del membro, avatar = suo avatar
+        await webhook.send(
+            content=messaggio,
+            username=member.display_name,
+            avatar_url=member.display_avatar.url,
+            allowed_mentions=discord.AllowedMentions(
+                everyone=False, roles=False, users=True
+            ),
+        )
+
+        await interaction.followup.send(
+            f"✅ Messaggio inviato in {target.mention} come **{member.display_name}**.",
+            ephemeral=True,
+        )
+
+
+# ══════════════════════════════════════════════════════════════════
 # COG — HELP
 # ══════════════════════════════════════════════════════════════════
 class HelpCog(commands.Cog):
@@ -4181,6 +4391,7 @@ class HelpCog(commands.Cog):
                     ("/ticket_transcript", "Staff Ticket", "Genera il transcript del ticket"),
                     ("/ticket_priority",   "Staff Ticket", "Cambia la priorità del ticket"),
                     ("/annuncio",          "Staff",        "Invia un annuncio formattato"),
+                    ("/comunicazioni",     "Staff",        "Scrivi nel canale come te stesso (no embed)"),
                 ],
             },
             {
@@ -4195,22 +4406,23 @@ class HelpCog(commands.Cog):
                 "title": "🎰 Casino",
                 "color": 0xF1C40F,
                 "commands": [
-                    ("/slot",                "Ruolo Casino",  "Gira le slot machine"),
-                    ("/coinflip",            "Ruolo Casino",  "Lancia una moneta"),
-                    ("/roulette",            "Ruolo Casino",  "Punta sulla roulette"),
-                    ("/casino_balance",      "Ruolo Casino",  "Vedi il tuo saldo"),
-                    ("/bet",                 "Ruolo Casino",  "Imposta puntata predefinita"),
-                    ("/daily",               "Ruolo Casino",  "Riscatta bonus giornaliero"),
-                    ("/casino_give",         "Ruolo Casino",  "Trasferisci monete a un altro"),
-                    ("/casino_leaderboard",  "Ruolo Casino",  "Classifica casino"),
-                    ("/casino_stats",        "Ruolo Casino",  "Le tue statistiche"),
-                    ("/casino_bonus_codice", "Ruolo Casino",  "Riscatta un codice promozionale"),
-                    ("/casino_addcoins",     "Staff Casino",  "Aggiungi monete a un utente"),
-                    ("/casino_removecoins",  "Staff Casino",  "Rimuovi monete a un utente"),
-                    ("/casino_reset",        "Staff Casino",  "Resetta account casino"),
-                    ("/casino_grant_role",   "Staff Casino",  "Assegna ruolo casino"),
-                    ("/casino_revoke_role",  "Staff Casino",  "Rimuovi ruolo casino"),
-                    ("/casino_bonus_crea",   "Staff Casino",  "Crea un codice promozionale"),
+                    ("/slot",                  "Ruolo Casino",  "Gira le slot machine"),
+                    ("/coinflip",              "Ruolo Casino",  "Lancia una moneta"),
+                    ("/roulette",              "Ruolo Casino",  "Punta sulla roulette"),
+                    ("/casino_balance",        "Ruolo Casino",  "Vedi il tuo saldo"),
+                    ("/bet",                   "Ruolo Casino",  "Imposta puntata predefinita"),
+                    ("/daily",                 "Ruolo Casino",  "Riscatta bonus giornaliero"),
+                    ("/casino_give",           "Ruolo Casino",  "Trasferisci monete a un altro"),
+                    ("/casino_leaderboard",    "Ruolo Casino",  "Classifica casino"),
+                    ("/casino_stats",          "Ruolo Casino",  "Le tue statistiche"),
+                    ("/casino_bonus_codice",   "Ruolo Casino",  "Riscatta un codice promozionale"),
+                    ("/casino_lista_codici",   "Staff Casino",  "Vedi tutti i codici promo"),
+                    ("/casino_addcoins",       "Staff Casino",  "Aggiungi monete a un utente"),
+                    ("/casino_removecoins",    "Staff Casino",  "Rimuovi monete a un utente"),
+                    ("/casino_reset",          "Staff Casino",  "Resetta account casino"),
+                    ("/casino_grant_role",     "Staff Casino",  "Assegna ruolo casino"),
+                    ("/casino_revoke_role",    "Staff Casino",  "Rimuovi ruolo casino"),
+                    ("/casino_bonus_crea",     "Staff Casino",  "Crea un codice promozionale"),
                 ],
             },
             {
@@ -4306,6 +4518,7 @@ class HelpCog(commands.Cog):
                 "🏆 Team Manager\n"
                 "📊 Sondaggi\n"
                 "💤 Sistema AFK\n"
+                "📣 Comunicazioni (scrivi come te stesso)\n"
             ),
             color=0x5865F2,
             timestamp=utcnow(),
@@ -4351,6 +4564,7 @@ class CombinedBot(commands.Bot):
         await self.add_cog(MissionCog(self))
         await self.add_cog(PollCog(self))
         await self.add_cog(AfkCog(self))
+        await self.add_cog(ComunicazioniCog(self))   # ← [MODIFICA 3]
         await self.add_cog(HelpCog(self))
 
         guild  = Config.guild_obj()
@@ -4409,7 +4623,6 @@ class CombinedBot(commands.Bot):
         for task in list(_ticket_close_tasks.values()):
             if not task.done():
                 task.cancel()
-        # Chiude il pool PostgreSQL in modo pulito
         if _db_pool:
             await _db_pool.close()
             log.info("Pool PostgreSQL chiuso.")
