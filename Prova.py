@@ -59,7 +59,6 @@ _TZ_OFFSET_RE = re.compile(r"[+-]\d{2}:?\d{2}$")
 
 
 def parse_naive(value: str | datetime.datetime) -> datetime.datetime:
-    """Converte stringa ISO o datetime in datetime naive UTC."""
     if isinstance(value, datetime.datetime):
         return value.replace(tzinfo=None) if value.tzinfo is not None else value
     raw = value.strip().replace("T", " ")
@@ -74,20 +73,16 @@ def parse_naive(value: str | datetime.datetime) -> datetime.datetime:
 # ══════════════════════════════════════════════════════════════════
 class Config:
 
-    # ── TOKEN & GUILD ─────────────────────────────────────────────
     TOKEN    = os.environ.get("BOT_TOKEN", "")
     GUILD_ID = int(os.environ.get("GUILD_ID", "0"))
 
-    # ── DATABASE (PostgreSQL su Railway) ──────────────────────────
     DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
-    # ── CANALI ────────────────────────────────────────────────────
     LOG_CHANNEL_ID         = 1493559866713964706
     CATEGORY_GENERAL       = 1501154415367950366
     CATEGORY_MISSION_ID    = 1499276810159128627
     PARTNERSHIP_CHANNEL_ID = 1390021687495622686
 
-    # ── RUOLI STAFF ───────────────────────────────────────────────
     STAFF_TICKET_ROLE_ID      = 1499048776588071095
     STAFF_CASINO_ROLE_ID      = 1499051397591601163
     STAFF_GIVEAWAY_ROLE_ID    = 1499051397591601163
@@ -95,14 +90,12 @@ class Config:
     STAFF_MISSION_ROLE_ID     = 1499051397591601163
     STAFF_PARTNERSHIP_ROLE_ID = 1499050738007932999
 
-    # ── RUOLI UTENTI ──────────────────────────────────────────────
     TEAM_ROLE_ID    = 1494779994944180224
     CASINO_ROLE_ID  = 1390082984215973918
     ROLE_PARTNER_ID = 1499840483852161144
     ROLE_ADMIN_ID   = 1499052316119273592
     ROLE_TRIAL_ID   = 1499048776588071095
 
-    # ── CASINO ────────────────────────────────────────────────────
     STARTING_BALANCE    = 250
     CASINO_COOLDOWN     = 3
     DAILY_BONUS_MIN     = 50
@@ -115,7 +108,6 @@ class Config:
     COLOR_GOLD   = 0xF1C40F
     COLOR_PURPLE = 0x9B59B6
 
-    # ── TICKET ────────────────────────────────────────────────────
     MAX_OPEN_TICKETS = 2
     COOLDOWN_SECONDS = 30
     AUTO_CLOSE_HOURS = 48
@@ -182,7 +174,6 @@ _giveaway_tasks_running: set[str]                = set()
 _ticket_close_tasks:     dict[int, asyncio.Task] = {}
 _afk_store:              dict[int, dict]         = {}
 
-# Pool globale asyncpg (inizializzato in setup_hook)
 _db_pool: Optional[asyncpg.Pool] = None
 
 
@@ -200,7 +191,6 @@ def _cleanup_giveaway_lock(g_id: str) -> None:
 # DATABASE — Pool asyncpg
 # ══════════════════════════════════════════════════════════════════
 async def create_pool() -> asyncpg.Pool:
-    """Crea il pool di connessioni PostgreSQL."""
     pool = await asyncpg.create_pool(
         Config.DATABASE_URL,
         ssl="require",
@@ -212,14 +202,12 @@ async def create_pool() -> asyncpg.Pool:
 
 
 def get_pool() -> asyncpg.Pool:
-    """Restituisce il pool globale (deve essere inizializzato prima)."""
     if _db_pool is None:
         raise RuntimeError("Pool del database non inizializzato.")
     return _db_pool
 
 
 async def init_db() -> None:
-    """Crea tutte le tabelle (se non esistono) su PostgreSQL."""
     pool = get_pool()
     async with pool.acquire() as conn:
         await conn.execute("""
@@ -686,7 +674,6 @@ async def db_create_promo(
 
 
 async def db_redeem_promo(code: str, user_id: int) -> tuple[bool, str, int]:
-    """Restituisce (successo, messaggio, monete_premiate)."""
     pool = get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -725,6 +712,19 @@ async def db_redeem_promo(code: str, user_id: int) -> tuple[bool, str, int]:
                 )
 
     return True, "✅ Codice riscattato!", row["reward"]
+
+
+# ══════════════════════════════════════════════════════════════════
+# DB HELPERS — PROMO CODES (ELIMINA)  ← MODIFICA
+# ══════════════════════════════════════════════════════════════════
+async def db_delete_promo(code: str) -> bool:
+    """Elimina fisicamente un codice promo e i relativi usi (CASCADE)."""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM promo_codes WHERE code = $1", code.upper()
+        )
+    return result.split()[-1] != "0"
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1433,8 +1433,6 @@ class MissionView(discord.ui.View):
         priv_embed.add_field(name="💰 Premio",    value=premio,    inline=True)
         priv_embed.set_footer(text=f"Accettata da {interaction.user}")
 
-        # ── [MODIFICA 1] Ping utente + staff nel messaggio del canale missione ──
-        # Uguale all'immagine: "@utente | @StaffRole"
         content_parts = [interaction.user.mention]
         if staff_role:
             content_parts.append(staff_role.mention)
@@ -2279,10 +2277,6 @@ class TicketModal(discord.ui.Modal):
         embed.add_field(name="Descrizione",    value=self.descrizione.value,    inline=False)
         embed.set_footer(text=f"User ID: {user.id}")
 
-        # ══════════════════════════════════════════════════════════
-        # [MODIFICA 1] PING STAFF NELL'APERTURA TICKET
-        # Formato uguale all'immagine: "@utente | @StaffRole"
-        # ══════════════════════════════════════════════════════════
         ping_parts = [user.mention]
         if staff_role:
             ping_parts.append(staff_role.mention)
@@ -2294,7 +2288,6 @@ class TicketModal(discord.ui.Modal):
             allowed_mentions=discord.AllowedMentions(users=True, roles=True),
         )
 
-        # Per i ticket Urgenti, invia un secondo messaggio di allerta
         if self.priority == "Urgente" and staff_role:
             await channel.send(
                 f"🚨 {staff_role.mention} — ticket **URGENTE** da gestire immediatamente!",
@@ -3912,14 +3905,31 @@ class CasinoCog(commands.Cog):
         embed.add_field(name="Scade",   value=f"Tra {scadenza}h" if scadenza > 0 else "Mai", inline=True)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    # ══════════════════════════════════════════════════════════════
-    # [MODIFICA 2] /casino_lista_codici — Vedi tutti i codici attivi
-    # Solo per Staff Casino
-    # ══════════════════════════════════════════════════════════════
+    # ── NUOVO COMANDO: rimuovi codice promo ── MODIFICA ──────────
     @app_commands.command(
-        name="casino_lista_codici",
-        description="[Staff Casino] Visualizza tutti i codici promozionali attivi",
+        name="casino_rimuovi_codice",
+        description="[Staff Casino] Elimina un codice promozionale dal database",
     )
+    @app_commands.describe(codice="Il codice da eliminare (es: ESTATE24)")
+    @app_commands.guild_only()
+    @casino_staff_check()
+    async def rimuovi_codice_cmd(
+        self, interaction: discord.Interaction, codice: str
+    ) -> None:
+        code_upper = codice.strip().upper()
+        deleted = await db_delete_promo(code_upper)
+        if deleted:
+            embed = base_embed("🗑️ Codice Eliminato", Config.COLOR_INFO, interaction.user)
+            embed.description = (
+                f"Il codice `{code_upper}` è stato **eliminato** dal database.\n"
+                "Tutti gli utilizzi precedenti vengono rimossi automaticamente."
+            )
+        else:
+            embed = base_embed("❌ Codice Non Trovato", Config.COLOR_LOSE, interaction.user)
+            embed.description = f"Nessun codice `{code_upper}` trovato nel database."
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="casino_lista_codici", description="[Staff Casino] Visualizza tutti i codici promozionali")
     @app_commands.guild_only()
     @casino_staff_check()
     async def lista_codici_cmd(self, interaction: discord.Interaction):
@@ -3939,11 +3949,9 @@ class CasinoCog(commands.Cog):
                 "📭 Nessun codice promozionale nel database.", ephemeral=True
             )
 
-        # Paginiamo in embed (max 10 per pagina)
         PAGE = 10
         pages: list[discord.Embed] = []
         chunks = [rows[i:i+PAGE] for i in range(0, len(rows), PAGE)]
-
         now = utcnow_naive()
 
         for idx, chunk in enumerate(chunks):
@@ -3956,8 +3964,6 @@ class CasinoCog(commands.Cog):
 
             for row in chunk:
                 stato = "✅ Attivo" if row["active"] else "❌ Esaurito/Disattivato"
-
-                # Scadenza
                 if row["expires_at"]:
                     exp_naive = parse_naive(row["expires_at"])
                     if now > exp_naive:
@@ -3969,7 +3975,6 @@ class CasinoCog(commands.Cog):
                 else:
                     scad_text = "Nessuna scadenza"
 
-                # Usi rimanenti
                 max_u = row["max_uses"]
                 remaining_uses = (
                     "Illimitato" if max_u >= 999_999_999
@@ -3988,11 +3993,9 @@ class CasinoCog(commands.Cog):
                 )
             pages.append(embed)
 
-        # Se c'è una sola pagina, manda direttamente
         if len(pages) == 1:
             return await interaction.response.send_message(embed=pages[0], ephemeral=True)
 
-        # Navigazione multi-pagina
         view = PromoCodesPageView(pages, interaction.user)
         await interaction.response.send_message(embed=pages[0], view=view, ephemeral=True)
         view._message = await interaction.original_response()
@@ -4087,7 +4090,7 @@ class CasinoCog(commands.Cog):
 
 
 # ══════════════════════════════════════════════════════════════════
-# [MODIFICA 2] View paginazione per lista codici promo
+# View paginazione per lista codici promo
 # ══════════════════════════════════════════════════════════════════
 class PromoCodesPageView(discord.ui.View):
     def __init__(self, pages: list[discord.Embed], invoker: discord.User | discord.Member):
@@ -4278,37 +4281,21 @@ class AfkCog(commands.Cog):
 
 
 # ══════════════════════════════════════════════════════════════════
-# [MODIFICA 3] COG — COMUNICAZIONI (webhook, scrive come un utente)
+# COG — COMUNICAZIONI  ← MODIFICA: usa send() del bot, no webhook
 # ══════════════════════════════════════════════════════════════════
 class ComunicazioniCog(commands.Cog):
     """
-    Il comando /comunicazioni usa un Webhook per inviare il messaggio
-    con il nome e l'avatar del membro che esegue il comando,
-    esattamente come se fosse lui a scrivere nel canale — senza embed,
-    senza tag "[APP]", senza nome del bot.
-
-    Requisiti permessi bot: Manage Webhooks
+    Invia il messaggio nel canale con il profilo del BOT.
+    Nessun webhook, nessun nome utente sovrapposto:
+    il messaggio appare esattamente come se il bot stesso avesse scritto.
     """
 
     def __init__(self, bot: "CombinedBot"):
         self.bot = bot
 
-    async def _get_or_create_webhook(
-        self, channel: discord.TextChannel
-    ) -> discord.Webhook:
-        """Trova (o crea) un webhook del bot nel canale target."""
-        existing = await channel.webhooks()
-        for wh in existing:
-            if wh.user and wh.user.id == self.bot.user.id:
-                return wh
-        return await channel.create_webhook(
-            name="ComunicazioniBot",
-            reason="Webhook per /comunicazioni",
-        )
-
     @app_commands.command(
         name="comunicazioni",
-        description="[Staff] Scrivi nel canale come se fossi tu (nessun embed, nessun tag bot)",
+        description="[Staff] Scrivi nel canale con il profilo del bot",
     )
     @app_commands.describe(
         messaggio="Il testo da inviare",
@@ -4324,39 +4311,34 @@ class ComunicazioniCog(commands.Cog):
     ) -> None:
         target = canale or interaction.channel
 
-        # Verifica permessi bot nel canale di destinazione
         perms = target.permissions_for(interaction.guild.me)
-        if not perms.manage_webhooks:
+        if not perms.send_messages:
             return await interaction.response.send_message(
-                f"❌ Non ho il permesso **Gestisci Webhook** in {target.mention}.\n"
-                "Aggiungilo dalle impostazioni del canale e riprova.",
+                f"❌ Non ho il permesso **Invia Messaggi** in {target.mention}.",
                 ephemeral=True,
             )
 
         await interaction.response.defer(ephemeral=True)
 
         try:
-            webhook = await self._get_or_create_webhook(target)
+            await target.send(
+                content=messaggio,
+                allowed_mentions=discord.AllowedMentions(
+                    everyone=False, roles=False, users=True
+                ),
+            )
         except discord.Forbidden:
             return await interaction.followup.send(
-                "❌ Impossibile creare il webhook. Controlla i permessi del bot.", ephemeral=True
+                "❌ Impossibile inviare il messaggio. Controlla i permessi del bot.",
+                ephemeral=True,
+            )
+        except discord.HTTPException as e:
+            return await interaction.followup.send(
+                f"❌ Errore nell'invio: {e}", ephemeral=True
             )
 
-        member = interaction.user  # sempre discord.Member in guild_only
-
-        # Invia il messaggio esattamente come se fosse l'utente a scriverlo:
-        # username = display_name del membro, avatar = suo avatar
-        await webhook.send(
-            content=messaggio,
-            username=member.display_name,
-            avatar_url=member.display_avatar.url,
-            allowed_mentions=discord.AllowedMentions(
-                everyone=False, roles=False, users=True
-            ),
-        )
-
         await interaction.followup.send(
-            f"✅ Messaggio inviato in {target.mention} come **{member.display_name}**.",
+            f"✅ Messaggio inviato in {target.mention}.",
             ephemeral=True,
         )
 
@@ -4391,7 +4373,7 @@ class HelpCog(commands.Cog):
                     ("/ticket_transcript", "Staff Ticket", "Genera il transcript del ticket"),
                     ("/ticket_priority",   "Staff Ticket", "Cambia la priorità del ticket"),
                     ("/annuncio",          "Staff",        "Invia un annuncio formattato"),
-                    ("/comunicazioni",     "Staff",        "Scrivi nel canale come te stesso (no embed)"),
+                    ("/comunicazioni",     "Staff",        "Scrivi nel canale con il profilo del bot"),
                 ],
             },
             {
@@ -4406,23 +4388,24 @@ class HelpCog(commands.Cog):
                 "title": "🎰 Casino",
                 "color": 0xF1C40F,
                 "commands": [
-                    ("/slot",                  "Ruolo Casino",  "Gira le slot machine"),
-                    ("/coinflip",              "Ruolo Casino",  "Lancia una moneta"),
-                    ("/roulette",              "Ruolo Casino",  "Punta sulla roulette"),
-                    ("/casino_balance",        "Ruolo Casino",  "Vedi il tuo saldo"),
-                    ("/bet",                   "Ruolo Casino",  "Imposta puntata predefinita"),
-                    ("/daily",                 "Ruolo Casino",  "Riscatta bonus giornaliero"),
-                    ("/casino_give",           "Ruolo Casino",  "Trasferisci monete a un altro"),
-                    ("/casino_leaderboard",    "Ruolo Casino",  "Classifica casino"),
-                    ("/casino_stats",          "Ruolo Casino",  "Le tue statistiche"),
-                    ("/casino_bonus_codice",   "Ruolo Casino",  "Riscatta un codice promozionale"),
-                    ("/casino_lista_codici",   "Staff Casino",  "Vedi tutti i codici promo"),
-                    ("/casino_addcoins",       "Staff Casino",  "Aggiungi monete a un utente"),
-                    ("/casino_removecoins",    "Staff Casino",  "Rimuovi monete a un utente"),
-                    ("/casino_reset",          "Staff Casino",  "Resetta account casino"),
-                    ("/casino_grant_role",     "Staff Casino",  "Assegna ruolo casino"),
-                    ("/casino_revoke_role",    "Staff Casino",  "Rimuovi ruolo casino"),
-                    ("/casino_bonus_crea",     "Staff Casino",  "Crea un codice promozionale"),
+                    ("/slot",                   "Ruolo Casino",  "Gira le slot machine"),
+                    ("/coinflip",               "Ruolo Casino",  "Lancia una moneta"),
+                    ("/roulette",               "Ruolo Casino",  "Punta sulla roulette"),
+                    ("/casino_balance",         "Ruolo Casino",  "Vedi il tuo saldo"),
+                    ("/bet",                    "Ruolo Casino",  "Imposta puntata predefinita"),
+                    ("/daily",                  "Ruolo Casino",  "Riscatta bonus giornaliero"),
+                    ("/casino_give",            "Ruolo Casino",  "Trasferisci monete a un altro"),
+                    ("/casino_leaderboard",     "Ruolo Casino",  "Classifica casino"),
+                    ("/casino_stats",           "Ruolo Casino",  "Le tue statistiche"),
+                    ("/casino_bonus_codice",    "Ruolo Casino",  "Riscatta un codice promozionale"),
+                    ("/casino_lista_codici",    "Staff Casino",  "Vedi tutti i codici promo"),
+                    ("/casino_bonus_crea",      "Staff Casino",  "Crea un codice promozionale"),
+                    ("/casino_rimuovi_codice",  "Staff Casino",  "Elimina un codice promozionale"),
+                    ("/casino_addcoins",        "Staff Casino",  "Aggiungi monete a un utente"),
+                    ("/casino_removecoins",     "Staff Casino",  "Rimuovi monete a un utente"),
+                    ("/casino_reset",           "Staff Casino",  "Resetta account casino"),
+                    ("/casino_grant_role",      "Staff Casino",  "Assegna ruolo casino"),
+                    ("/casino_revoke_role",     "Staff Casino",  "Rimuovi ruolo casino"),
                 ],
             },
             {
@@ -4518,7 +4501,7 @@ class HelpCog(commands.Cog):
                 "🏆 Team Manager\n"
                 "📊 Sondaggi\n"
                 "💤 Sistema AFK\n"
-                "📣 Comunicazioni (scrivi come te stesso)\n"
+                "📣 Comunicazioni (scrivi con il profilo del bot)\n"
             ),
             color=0x5865F2,
             timestamp=utcnow(),
@@ -4544,19 +4527,16 @@ class CombinedBot(commands.Bot):
         global _db_pool
         Config.validate()
 
-        # ── Crea il pool PostgreSQL ────────────────────────────────
         _db_pool = await create_pool()
         log.info("Pool PostgreSQL creato.")
         await init_db()
 
-        # ── View persistenti ──────────────────────────────────────
         self.add_view(TicketControlView())
         self.add_view(MainPersistentView())
         self.add_view(GiveawayView(None))
         self.add_view(MissionView())
         self.add_view(MissionControl())
 
-        # ── Cog ───────────────────────────────────────────────────
         await self.add_cog(TeamCog(self))
         await self.add_cog(TicketCog(self))
         await self.add_cog(GiveawayCog(self))
@@ -4564,7 +4544,7 @@ class CombinedBot(commands.Bot):
         await self.add_cog(MissionCog(self))
         await self.add_cog(PollCog(self))
         await self.add_cog(AfkCog(self))
-        await self.add_cog(ComunicazioniCog(self))   # ← [MODIFICA 3]
+        await self.add_cog(ComunicazioniCog(self))
         await self.add_cog(HelpCog(self))
 
         guild  = Config.guild_obj()
@@ -4580,7 +4560,6 @@ class CombinedBot(commands.Bot):
                 name="⚔️ missioni · 🎰 casino · 🎫 ticket · 🎉 giveaway · 🤝 partnership",
             )
         )
-        # Ripristina ticket "closing" interrotti dal restart
         pool = get_pool()
         async with pool.acquire() as conn:
             await conn.execute("UPDATE tickets SET status='open' WHERE status='closing'")
