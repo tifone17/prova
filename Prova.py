@@ -3766,7 +3766,7 @@ class ShopCog(commands.Cog):
     def __init__(self, bot: "CombinedBot"):
         self.bot = bot
 
-    @app_commands.command(name="shop", description="🛍️ Acquista moltiplicatori o ruoli con le tue monete")
+    @app_commands.command(name="negozio_fluxt", description="🛍️ Negozio FluxT - Acquista ruoli esclusivi con le tue monete")
     @app_commands.guild_only()
     @casino_access_check()
     async def shop_cmd(self, interaction: discord.Interaction):
@@ -4570,67 +4570,8 @@ class AfkCog(commands.Cog):
                         delete_after=15,
                     )
 
-# ══════════════════════════════════════════════════════════════════
-# COG — COMUNICAZIONI  ← MODIFICA: usa send() del bot, no webhook
-# ══════════════════════════════════════════════════════════════════
-class ComunicazioniCog(commands.Cog):
-    """
-    Invia il messaggio nel canale con il profilo del BOT.
-    Nessun webhook, nessun nome utente sovrapposto:
-    il messaggio appare esattamente come se il bot stesso avesse scritto.
-    """
 
-    def __init__(self, bot: "CombinedBot"):
-        self.bot = bot
 
-    @app_commands.command(
-        name="comunicazioni",
-        description="[Staff] Scrivi nel canale con il profilo del bot",
-    )
-    @app_commands.describe(
-        messaggio="Il testo da inviare",
-        canale="Canale destinazione (lascia vuoto = canale corrente)",
-    )
-    @app_commands.guild_only()
-    @ticket_staff_check()
-    async def comunicazioni_cmd(
-        self,
-        interaction: discord.Interaction,
-        messaggio: str,
-        canale: Optional[discord.TextChannel] = None,
-    ) -> None:
-        target = canale or interaction.channel
-
-        perms = target.permissions_for(interaction.guild.me)
-        if not perms.send_messages:
-            return await interaction.response.send_message(
-                f"❌ Non ho il permesso **Invia Messaggi** in {target.mention}.",
-                ephemeral=True,
-            )
-
-        await interaction.response.defer(ephemeral=True)
-
-        try:
-            await target.send(
-                content=messaggio,
-                allowed_mentions=discord.AllowedMentions(
-                    everyone=False, roles=False, users=True
-                ),
-            )
-        except discord.Forbidden:
-            return await interaction.followup.send(
-                "❌ Impossibile inviare il messaggio. Controlla i permessi del bot.",
-                ephemeral=True,
-            )
-        except discord.HTTPException as e:
-            return await interaction.followup.send(
-                f"❌ Errore nell'invio: {e}", ephemeral=True
-            )
-
-        await interaction.followup.send(
-            f"✅ Messaggio inviato in {target.mention}.",
-            ephemeral=True,
-        )
 
 # ══════════════════════════════════════════════════════════════════
 # COG — HELP
@@ -4661,8 +4602,7 @@ class HelpCog(commands.Cog):
                     ("/ticket_info",       "Tutti",        "Info sul ticket corrente"),
                     ("/ticket_transcript", "Staff Ticket", "Genera il transcript del ticket"),
                     ("/ticket_priority",   "Staff Ticket", "Cambia la priorità del ticket"),
-                    ("/annuncio",          "Staff",        "Invia un annuncio formattato"),
-                    ("/comunicazioni",     "Staff",        "Scrivi nel canale con il profilo del bot"),
+
                 ],
             },
             {
@@ -4724,7 +4664,7 @@ class HelpCog(commands.Cog):
                 "title": "🛍️ Shop",
                 "color": Config.COLOR_PURPLE,
                 "commands": [
-                    ("/shop", "Ruolo Casino", "Acquista moltiplicatori o ruoli"),
+                    ("/negozio_fluxt", "Ruolo Casino", "Negozio FluxT - Acquista ruoli esclusivi"),
                 ],
             },
             {
@@ -4843,7 +4783,7 @@ class CombinedBot(commands.Bot):
         await self.add_cog(MissionCog(self))
         await self.add_cog(PollCog(self))
         await self.add_cog(AfkCog(self))
-        await self.add_cog(ComunicazioniCog(self))
+
         await self.add_cog(HelpCog(self))
 
         guild  = Config.guild_obj()
