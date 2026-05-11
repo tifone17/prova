@@ -173,6 +173,10 @@ class Config:
             if getattr(cls, attr, 0) == 0:
                 log.warning("⚠️  Config.%s = 0 — ricordati di impostarlo.", attr)
 
+        for i, role_item in enumerate(cls.SHOP_ROLES):
+            if role_item["role_id"] == 0:
+                log.warning("⚠️  Config.SHOP_ROLES[%d][\"role_id\"] = 0 — ricordati di impostarlo.", i)
+
     @classmethod
     def guild_obj(cls) -> discord.Object:
         return discord.Object(id=cls.GUILD_ID)
@@ -776,7 +780,8 @@ async def casino_update_balance(user_id: int, amount: int) -> int:
         await conn.execute(
             "INSERT INTO casino_users(user_id) VALUES($1) ON CONFLICT DO NOTHING", user_id
         )
-        val = await conn.fetchval(
+
+        row = await conn.fetchrow(
             """
             UPDATE casino_users
             SET balance = GREATEST(0, balance + $1)
@@ -785,7 +790,7 @@ async def casino_update_balance(user_id: int, amount: int) -> int:
             """,
             amount, user_id,
         )
-        new_balance = row["balance"]
+        new_balance = row["balance"] if row else 0  # Handle case where row might be None
 
         # Update win statistics only if amount is positive (a win)
         if amount > 0:
