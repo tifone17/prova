@@ -102,6 +102,19 @@ class Config:
     DAILY_BONUS_MAX     = 200
     COINFLIP_WIN_CHANCE = 40
 
+    MISSION_CHANNEL_ID          = 0 # ID del canale dove annunciare le missioni
+    MISSION_MESSAGE_COUNT_TARGET = 50
+    MISSION_MESSAGE_COUNT_REWARD = 100
+
+    SHOP_MULTIPLIERS = [
+        {"name": "x1.5 per 5 giocate", "multiplier": 1.5, "uses": 5, "cost": 200},
+        {"name": "x2.0 per 3 giocate", "multiplier": 2.0, "uses": 3, "cost": 500},
+    ]
+    SHOP_ROLES = [
+        {"name": "Ruolo VIP Bronzo", "role_id": 1503399636713603244, "cost": 2000},
+        {"name": "Ruolo VIP Argento", "role_id": 1503400072212385973, "cost": 5000},
+    ]
+
     COLOR_WIN    = 0x2ECC71
     COLOR_LOSE   = 0xE74C3C
     COLOR_INFO   = 0x3498DB
@@ -154,6 +167,7 @@ class Config:
             "STAFF_TEAM_ROLE_ID", "STAFF_MISSION_ROLE_ID", "TEAM_ROLE_ID",
             "CASINO_ROLE_ID", "ROLE_ADMIN_ID", "ROLE_TRIAL_ID",
             "STAFF_PARTNERSHIP_ROLE_ID", "ROLE_PARTNER_ID", "PARTNERSHIP_CHANNEL_ID",
+            "MISSION_CHANNEL_ID",
         ]
         for attr in optional_ids:
             if getattr(cls, attr, 0) == 0:
@@ -308,6 +322,37 @@ async def init_db() -> None:
                 user_id BIGINT NOT NULL,
                 used_at TIMESTAMP DEFAULT NOW(),
                 PRIMARY KEY (code, user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS daily_missions (
+                id          SERIAL PRIMARY KEY,
+                type        TEXT    NOT NULL,
+                target      INTEGER NOT NULL,
+                reward      INTEGER NOT NULL,
+                active_date DATE    UNIQUE NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS user_missions (
+                user_id    BIGINT  NOT NULL,
+                mission_id INTEGER NOT NULL REFERENCES daily_missions(id) ON DELETE CASCADE,
+                progress   INTEGER DEFAULT 0,
+                completed  BOOLEAN DEFAULT FALSE,
+                PRIMARY KEY (user_id, mission_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS shop_multipliers (
+                id         SERIAL PRIMARY KEY,
+                name       TEXT          NOT NULL UNIQUE,
+                multiplier NUMERIC(3, 2) NOT NULL,
+                uses       INTEGER       NOT NULL,
+                cost       INTEGER       NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS user_multipliers (
+                user_id        BIGINT  NOT NULL,
+                multiplier_id  INTEGER NOT NULL REFERENCES shop_multipliers(id) ON DELETE CASCADE,
+                remaining_uses INTEGER NOT NULL,
+                PRIMARY KEY (user_id, multiplier_id)
             );
 
             CREATE TABLE IF NOT EXISTS polls (
@@ -535,6 +580,91 @@ async def db_get_giveaway(g_id: str) -> Optional[dict]:
             "SELECT * FROM giveaways WHERE id = $1", g_id
         )
     return dict(row) if row else None
+
+
+async def db_get_daily_mission(date: datetime.date) -> Optional[dict]:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM daily_missions WHERE active_date = $1", date)
+    return dict(row) if row else None
+
+
+async def db_create_daily_mission(type: str, target: int, reward: int, date: datetime.date) -> dict:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "INSERT INTO daily_missions (type, target, reward, active_date) VALUES ($1, $2, $3, $4) RETURNING *",
+            type, target, reward, date
+        )
+    return dict(row) if row else {}
+
+
+async def db_get_user_mission_progress(user_id: int, mission_id: int) -> Optional[dict]:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM user_missions WHERE user_id = $1 AND mission_id = $2",
+            user_id, mission_id
+        )
+    return dict(row) if row else None
+
+
+async def db_upsert_user_mission_progress(user_id: int, mission_id: int, progress: int, completed: bool) -> None:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO user_missions (user_id, mission_id, progress, completed)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (user_id, mission_id) DO UPDATE
+            SET progress = $3, completed = $4
+            """,
+            user_id, mission_id, progress, completed
+        )
+
+
+async def db_get_shop_multipliers() -> list[dict]:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM shop_multipliers")
+    return [dict(r) for r in rows]
+
+
+async def db_get_user_multipliers(user_id: int) -> list[dict]:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT sm.name, sm.multiplier, um.remaining_uses FROM user_multipliers um JOIN shop_multipliers sm ON um.multiplier_id = sm.id WHERE um.user_id = $1",
+            user_id
+        )
+    return [dict(r) for r in rows]
+
+
+async def db_add_user_multiplier(user_id: int, multiplier_id: int, uses: int) -> None:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO user_multipliers (user_id, multiplier_id, remaining_uses)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (user_id, multiplier_id) DO UPDATE
+            SET remaining_uses = user_multipliers.remaining_uses + $3
+            """,
+            user_id, multiplier_id, uses
+        )
+
+
+async def db_decrement_user_multiplier(user_id: int, multiplier_id: int) -> None:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE user_multipliers SET remaining_uses = remaining_uses - 1 WHERE user_id = $1 AND multiplier_id = $2",
+            user_id, multiplier_id
+        )
+        await conn.execute(
+            "DELETE FROM user_multipliers WHERE user_id = $1 AND multiplier_id = $2 AND remaining_uses <= 0",
+            user_id, multiplier_id
+        )
 
 
 async def db_get_expired_giveaways() -> list[dict]:
@@ -1634,7 +1764,7 @@ class AddMemberModal(discord.ui.Modal, title="Aggiungi Membro al Team"):
             return await interaction.response.send_message(
                 f"❌ Nessun membro trovato con ID `{user_id}`.", ephemeral=True
             )
-        mc = self.mc_name_field.value.strip()
+        mc = self.mc_name_field.value.strip()()
         if not _MC_NAME_RE.match(mc):
             return await interaction.response.send_message(
                 "❌ Nickname Minecraft non valido (lettere, cifre, _, 3–16 caratteri).",
@@ -1972,10 +2102,6 @@ class JoinTeamReviewView(discord.ui.View):
                     color=0x2ECC71, timestamp=utcnow(),
                 )
             )
-        await asyncio.sleep(5)
-        ticket = await get_ticket(self.channel.id)
-        if ticket and ticket["status"] == "open":
-            await close_ticket(self.channel, interaction.user, interaction.guild, reason="Candidatura team accettata")
 
     @discord.ui.button(label="❌ RIFIUTA", style=discord.ButtonStyle.danger, custom_id="join_team_reject_v17")
     async def reject_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -3775,6 +3901,122 @@ class GiveawayCog(commands.Cog):
 # ══════════════════════════════════════════════════════════════════
 # COG — CASINO
 # ══════════════════════════════════════════════════════════════════
+class ShopCog(commands.Cog):
+    def __init__(self, bot: "CombinedBot"):
+        self.bot = bot
+
+    @app_commands.command(name="shop", description="🛍️ Acquista moltiplicatori o ruoli con le tue monete")
+    @app_commands.guild_only()
+    @casino_access_check()
+    async def shop_cmd(self, interaction: discord.Interaction):
+        embed = discord.Embed(
+            title="🛍️ Negozio di MetaMC",
+            description="Scegli cosa vuoi acquistare con le tue monete del casinò.",
+            color=Config.COLOR_PURPLE,
+            timestamp=utcnow(),
+        )
+        embed.set_footer(text=f"Il tuo saldo: {coin(await casino_get_balance(interaction.user.id))}")
+        await interaction.response.send_message(embed=embed, view=ShopView(self.bot), ephemeral=True)
+
+
+class ShopView(discord.ui.View):
+    def __init__(self, bot: "CombinedBot"):
+        super().__init__(timeout=180)
+        self.bot = bot
+        self.add_item(ShopSelect(bot))
+
+
+class ShopSelect(discord.ui.Select):
+    def __init__(self, bot: "CombinedBot"):
+        self.bot = bot
+        options = []
+
+        # Add multipliers to options
+        for i, item in enumerate(Config.SHOP_MULTIPLIERS):
+            options.append(discord.SelectOption(
+                label=f"{item['name']} ({coin(item['cost'])})",
+                value=f"multiplier_{i}",
+                description=f"Moltiplicatore x{item['multiplier']} per {item['uses']} giocate."
+            ))
+
+        # Add roles to options
+        for i, item in enumerate(Config.SHOP_ROLES):
+            role = bot.get_guild(Config.GUILD_ID).get_role(item['role_id'])
+            if role:
+                options.append(discord.SelectOption(
+                    label=f"{item['name']} ({coin(item['cost'])})",
+                    value=f"role_{i}",
+                    description=f"Assegna il ruolo {role.name}."
+                ))
+
+        super().__init__(
+            placeholder="Scegli un articolo...",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="shop_select_menu"
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        user_id = interaction.user.id
+        balance = await casino_get_balance(user_id)
+        selected_value = self.values[0]
+
+        if selected_value.startswith("multiplier_"):
+            index = int(selected_value.split("_")[1])
+            item = Config.SHOP_MULTIPLIERS[index]
+            item_cost = item['cost']
+
+            if balance < item_cost:
+                return await interaction.response.send_message(
+                    f"❌ Non hai abbastanza monete per acquistare {item['name']}. Saldo: {coin(balance)}",
+                    ephemeral=True
+                )
+
+            await casino_update_balance(user_id, -item_cost)
+            # Assuming multiplier_id is the index for now, will update if actual IDs are used
+            await db_add_user_multiplier(user_id, index, item['uses'])
+
+            await interaction.response.send_message(
+                f"✅ Hai acquistato **{item['name']}** per {coin(item_cost)}! Il tuo nuovo saldo è {coin(await casino_get_balance(user_id))}.",
+                ephemeral=True
+            )
+
+        elif selected_value.startswith("role_"):
+            index = int(selected_value.split("_")[1])
+            item = Config.SHOP_ROLES[index]
+            item_cost = item['cost']
+            role_id = item['role_id']
+
+            if balance < item_cost:
+                return await interaction.response.send_message(
+                    f"❌ Non hai abbastanza monete per acquistare {item['name']}. Saldo: {coin(balance)}",
+                    ephemeral=True
+                )
+
+            guild = interaction.guild
+            role = guild.get_role(role_id)
+            if not role:
+                return await interaction.response.send_message("❌ Ruolo non trovato. Contatta un amministratore.", ephemeral=True)
+
+            if role in interaction.user.roles:
+                return await interaction.response.send_message(f"ℹ️ Hai già il ruolo {role.mention}.", ephemeral=True)
+
+            await casino_update_balance(user_id, -item_cost)
+            ok, err = await safe_add_role(interaction.user, role)
+
+            if ok:
+                await interaction.response.send_message(
+                    f"✅ Hai acquistato il ruolo {role.mention} per {coin(item_cost)}! Il tuo nuovo saldo è {coin(await casino_get_balance(user_id))}.",
+                    ephemeral=True
+                )
+            else:
+                await interaction.response.send_message(
+                    f"❌ Errore nell'assegnazione del ruolo: {err}. Contatta un amministratore.",
+                    ephemeral=True
+                )
+
+
 class CasinoCog(commands.Cog):
     def __init__(self, bot: "CombinedBot"):
         self.bot = bot
@@ -3822,6 +4064,27 @@ class CasinoCog(commands.Cog):
         prize, label = evaluate_spin(result, bet)
         won          = prize > 0
 
+        # Apply multipliers
+        user_multipliers = await db_get_user_multipliers(uid)
+        active_multiplier = 1.0
+        multiplier_id = None
+        for i, m in enumerate(Config.SHOP_MULTIPLIERS):
+            for user_m in user_multipliers:
+                if user_m["name"] == m["name"] and user_m["remaining_uses"] > 0:
+                    active_multiplier = m["multiplier"]
+                    multiplier_id = i # Assuming index as ID for now
+                    break
+            if multiplier_id is not None: break
+
+        if active_multiplier > 1.0 and prize > 0:
+            original_prize = prize
+            prize = int(prize * active_multiplier)
+            label += f" (x{active_multiplier} Moltiplicatore!)"
+            if multiplier_id is not None:
+                await db_decrement_user_multiplier(uid, multiplier_id)
+
+
+
         if won:
             new_bal = await casino_update_balance(uid, prize)
             net     = prize - bet
@@ -3829,7 +4092,7 @@ class CasinoCog(commands.Cog):
             embed.description = (
                 f"## {' ｜ '.join(result)}\n\n"
                 f"✨ {label}\n\n"
-                f"**Vinto:** {coin(prize)}  (+{coin(net)} netto)\n"
+                f"**Vinto:** {coin(prize)}  (+{coin(prize - bet)} netto)\n"
                 f"**Saldo:** {coin(new_bal)}"
             )
         else:
@@ -3873,8 +4136,28 @@ class CasinoCog(commands.Cog):
         outcome = scelta if won else ("testa" if scelta == "croce" else "croce")
         icon    = "🦅" if outcome == "testa" else "🏛️"
 
+        # Apply multipliers
+        user_multipliers = await db_get_user_multipliers(uid)
+        active_multiplier = 1.0
+        multiplier_id = None
+        for i, m in enumerate(Config.SHOP_MULTIPLIERS):
+            for user_m in user_multipliers:
+                if user_m["name"] == m["name"] and user_m["remaining_uses"] > 0:
+                    active_multiplier = m["multiplier"]
+                    multiplier_id = i # Assuming index as ID for now
+                    break
+            if multiplier_id is not None: break
+
+        if active_multiplier > 1.0 and won:
+            puntata = int(puntata * active_multiplier)
+            if multiplier_id is not None:
+                await db_decrement_user_multiplier(uid, multiplier_id)
+
+
         if won:
             new_bal = await casino_update_balance(uid, puntata * 2)
+            # Multiplier applied to puntata, so prize is puntata * 2
+            prize = puntata * 2
             embed   = base_embed(f"{icon} Hai vinto!", Config.COLOR_WIN, interaction.user)
             embed.description = f"La moneta mostra: **{outcome.capitalize()}**\n\nVinto: {coin(puntata)}\nSaldo: {coin(new_bal)}"
         else:
@@ -3882,7 +4165,7 @@ class CasinoCog(commands.Cog):
             embed   = base_embed(f"{icon} Hai perso!", Config.COLOR_LOSE, interaction.user)
             embed.description = f"La moneta mostra: **{outcome.capitalize()}**\n\nPerso: {coin(puntata)}\nSaldo: {coin(new_bal)}"
 
-        await casino_record_game(uid, won, puntata * 2 if won else 0)
+        await casino_record_game(uid, won, prize if won else 0)
         await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="roulette", description="🎡 Punta sulla roulette")
@@ -3917,10 +4200,30 @@ class CasinoCog(commands.Cog):
         prize, detail = roulette_evaluate(tipo, valore, result, puntata)
         won           = prize > 0
 
+        # Apply multipliers
+        user_multipliers = await db_get_user_multipliers(uid)
+        active_multiplier = 1.0
+        multiplier_id = None
+        for i, m in enumerate(Config.SHOP_MULTIPLIERS):
+            for user_m in user_multipliers:
+                if user_m["name"] == m["name"] and user_m["remaining_uses"] > 0:
+                    active_multiplier = m["multiplier"]
+                    multiplier_id = i # Assuming index as ID for now
+                    break
+            if multiplier_id is not None: break
+
+        if active_multiplier > 1.0 and won:
+            original_prize = prize
+            prize = int(prize * active_multiplier)
+            detail += f" (x{active_multiplier} Moltiplicatore!)"
+            if multiplier_id is not None:
+                await db_decrement_user_multiplier(uid, multiplier_id)
+
+
         if won:
             new_bal = await casino_update_balance(uid, prize)
             embed   = base_embed("🎡 Roulette — Vittoria!", Config.COLOR_WIN, interaction.user)
-            embed.description = f"{detail}\n\n**Vinto:** {coin(prize)}\n**Saldo:** {coin(new_bal)}"
+            embed.description = f"{detail}\n\n**Vinto:** {coin(prize)} (+{coin(prize - puntata)} netto)\n**Saldo:** {coin(new_bal)}"
         else:
             new_bal = data["balance"] - puntata
             embed   = base_embed("🎡 Roulette — Sconfitta", Config.COLOR_LOSE, interaction.user)
@@ -4648,18 +4951,25 @@ class HelpCog(commands.Cog):
                 "color": 0x8B0000,
                 "commands": [
                     ("/missione-crea", "Staff Missioni", "Pubblica una missione sulla bacheca"),
+                    ("/missioni_attive", "Tutti", "Mostra la missione giornaliera attiva"),
+                    ("/missioni_progresso", "Tutti", "Mostra il tuo progresso nella missione"),
+                ],
+            },
+            {
+                "title": "🛍️ Shop",
+                "color": Config.COLOR_PURPLE,
+                "commands": [
+                    ("/shop", "Ruolo Casino", "Acquista moltiplicatori o ruoli"),
                 ],
             },
             {
                 "title": "🏆 Team",
                 "color": 0x27AE60,
                 "commands": [
-                    ("/add_member",                     "Staff Team", "Aggiunge membro al team"),
-                    ("/remove_member",                  "Staff Team", "Rimuove membro dal team"),
-                    ("/list_members",                   "Tutti",      "Lista membri del team"),
-                    ("/mc_lookup",                      "Staff Team", "Cerca Discord da nickname MC"),
-                    ("Ticket categoria Unisciti al Team", "Tutti",      "Apri candidatura per entrare nel team"),
-                    ("Pulsante ACCETTA/RIFIUTA",          "Staff Team", "Accetta/rifiuta la candidatura team"),
+                    ("/add_member",    "Staff Team", "Aggiunge membro al team"),
+                    ("/remove_member", "Staff Team", "Rimuove membro dal team"),
+                    ("/list_members",  "Tutti",      "Lista membri del team"),
+                    ("/mc_lookup",     "Staff Team", "Cerca Discord da nickname MC"),
                 ],
             },
             {
@@ -4721,6 +5031,7 @@ class HelpCog(commands.Cog):
                 "🎰 Casino (Slot, Coinflip, Roulette, Codici Promo)\n"
                 "🎉 Giveaway (con sistema Fortuna e Requisiti)\n"
                 "⚔️ Missioni\n"
+                "🛍️ Shop\n"
                 "🏆 Team Manager\n"
                 "📊 Sondaggi\n"
                 "💤 Sistema AFK\n"
@@ -4764,6 +5075,7 @@ class CombinedBot(commands.Bot):
         await self.add_cog(TicketCog(self))
         await self.add_cog(GiveawayCog(self))
         await self.add_cog(CasinoCog(self))
+        await self.add_cog(ShopCog(self))
         await self.add_cog(MissionCog(self))
         await self.add_cog(PollCog(self))
         await self.add_cog(AfkCog(self))
@@ -4787,12 +5099,57 @@ class CombinedBot(commands.Bot):
         async with pool.acquire() as conn:
             await conn.execute("UPDATE tickets SET status='open' WHERE status='closing'")
         log.info("Ticket 'closing' ripristinati a 'open' dopo il restart.")
+        self.daily_mission_task.start()
+
+    @tasks.loop(hours=24)
+    async def daily_mission_task(self) -> None:
+        await self.wait_until_ready()
+        today = utcnow().date()
+        mission = await db_get_daily_mission(today)
+
+        if not mission:
+            # Create a new mission for today
+            mission_type = "message_count"
+            target = Config.MISSION_MESSAGE_COUNT_TARGET
+            reward = Config.MISSION_MESSAGE_COUNT_REWARD
+            mission = await db_create_daily_mission(mission_type, target, reward, today)
+
+            # Announce the new mission
+            mission_channel = self.get_channel(Config.MISSION_CHANNEL_ID)
+            if mission_channel and isinstance(mission_channel, discord.TextChannel):
+                embed = discord.Embed(
+                    title="✨ Nuova Missione Giornaliera! ✨",
+                    description=f"Scrivi **{target} messaggi** oggi per guadagnare **{reward} monete** del casinò!",
+                    color=Config.COLOR_GOLD,
+                    timestamp=utcnow(),
+                )
+                await mission_channel.send(content="@everyone", embed=embed, allowed_mentions=discord.AllowedMentions(everyone=True))
 
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot:
             return
         if message.guild is not None:
             await try_update_last_message(message.channel.id)
+
+            # Daily Mission: Message Count
+            today = utcnow().date()
+            mission = await db_get_daily_mission(today)
+            if mission and mission["type"] == "message_count":
+                user_mission = await db_get_user_mission_progress(message.author.id, mission["id"])
+                current_progress = user_mission["progress"] if user_mission else 0
+                completed = user_mission["completed"] if user_mission else False
+
+                if not completed:
+                    new_progress = current_progress + 1
+                    await db_upsert_user_mission_progress(message.author.id, mission["id"], new_progress, False)
+
+                    if new_progress >= mission["target"]:
+                        await db_upsert_user_mission_progress(message.author.id, mission["id"], new_progress, True)
+                        await casino_update_balance(message.author.id, mission["reward"])
+                        await message.channel.send(
+                            f"🎉 {message.author.mention}, hai completato la missione giornaliera e guadagnato **{mission['reward']} monete**!"
+                        )
+
         await self.process_commands(message)
 
     async def on_app_command_error(
