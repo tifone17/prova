@@ -25,7 +25,6 @@ try:
 except ImportError:
     HAS_CHAT_EXPORTER = False
 
-
 # ══════════════════════════════════════════════════════════════════
 # LOGGING
 # ══════════════════════════════════════════════════════════════════
@@ -40,23 +39,18 @@ logging.basicConfig(
 )
 log = logging.getLogger("CombinedBot")
 
-
 # ══════════════════════════════════════════════════════════════════
 # UTILITY — datetime
 # ══════════════════════════════════════════════════════════════════
 _UTC = ZoneInfo("UTC")
 
-
 def utcnow() -> datetime.datetime:
     return datetime.datetime.now(_UTC)
-
 
 def utcnow_naive() -> datetime.datetime:
     return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
 
-
 _TZ_OFFSET_RE = re.compile(r"[+-]\d{2}:?\d{2}$")
-
 
 def parse_naive(value: str | datetime.datetime) -> datetime.datetime:
     if isinstance(value, datetime.datetime):
@@ -66,7 +60,6 @@ def parse_naive(value: str | datetime.datetime) -> datetime.datetime:
     raw = _TZ_OFFSET_RE.sub("", raw)
     dt = datetime.datetime.fromisoformat(raw)
     return dt.replace(tzinfo=None) if dt.tzinfo is not None else dt
-
 
 # ══════════════════════════════════════════════════════════════════
 # CONFIG
@@ -106,10 +99,6 @@ class Config:
     MISSION_MESSAGE_COUNT_TARGET = 50
     MISSION_MESSAGE_COUNT_REWARD = 100
 
-    SHOP_MULTIPLIERS = [
-        {"name": "x1.5 per 5 giocate", "multiplier": 1.5, "uses": 5, "cost": 500},
-        {"name": "x2.0 per 3 giocate", "multiplier": 2.0, "uses": 3, "cost": 1000},
-    ]
     SHOP_ROLES = [
         {"name": "Ruolo VIP Bronzo", "role_id": 1503399636713603244, "cost": 2000},
         {"name": "Ruolo VIP Argento", "role_id": 1503400072212385973, "cost": 5000},
@@ -181,7 +170,6 @@ class Config:
     def guild_obj(cls) -> discord.Object:
         return discord.Object(id=cls.GUILD_ID)
 
-
 # ══════════════════════════════════════════════════════════════════
 # COSTANTI GLOBALI
 # ══════════════════════════════════════════════════════════════════
@@ -195,16 +183,13 @@ _afk_store:              dict[int, dict]         = {}
 
 _db_pool: Optional[asyncpg.Pool] = None
 
-
 def _get_giveaway_lock(g_id: str) -> asyncio.Lock:
     if g_id not in _giveaway_close_locks:
         _giveaway_close_locks[g_id] = asyncio.Lock()
     return _giveaway_close_locks[g_id]
 
-
 def _cleanup_giveaway_lock(g_id: str) -> None:
     _giveaway_close_locks.pop(g_id, None)
-
 
 # ══════════════════════════════════════════════════════════════════
 # DATABASE — Pool asyncpg
@@ -219,12 +204,10 @@ async def create_pool() -> asyncpg.Pool:
     )
     return pool
 
-
 def get_pool() -> asyncpg.Pool:
     if _db_pool is None:
         raise RuntimeError("Pool del database non inizializzato.")
     return _db_pool
-
 
 async def init_db() -> None:
     pool = get_pool()
@@ -344,21 +327,6 @@ async def init_db() -> None:
                 PRIMARY KEY (user_id, mission_id)
             );
 
-            CREATE TABLE IF NOT EXISTS shop_multipliers (
-                id         SERIAL PRIMARY KEY,
-                name       TEXT          NOT NULL UNIQUE,
-                multiplier NUMERIC(3, 2) NOT NULL,
-                uses       INTEGER       NOT NULL,
-                cost       INTEGER       NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS user_multipliers (
-                user_id        BIGINT  NOT NULL,
-                multiplier_id  INTEGER NOT NULL REFERENCES shop_multipliers(id) ON DELETE CASCADE,
-                remaining_uses INTEGER NOT NULL,
-                PRIMARY KEY (user_id, multiplier_id)
-            );
-
             CREATE TABLE IF NOT EXISTS deleted_messages (
                 id BIGINT PRIMARY KEY,
                 channel_id BIGINT NOT NULL,
@@ -409,7 +377,6 @@ async def init_db() -> None:
         """)
     log.info("Database PostgreSQL inizializzato.")
 
-
 # ══════════════════════════════════════════════════════════════════
 # DB HELPERS — TEAM
 # ══════════════════════════════════════════════════════════════════
@@ -428,7 +395,6 @@ async def db_upsert_member(discord_id: int, mc_name: str, added_by: int) -> None
             discord_id, mc_name, added_by,
         )
 
-
 async def db_delete_member(discord_id: int) -> bool:
     pool = get_pool()
     async with pool.acquire() as conn:
@@ -436,7 +402,6 @@ async def db_delete_member(discord_id: int) -> bool:
             "DELETE FROM members WHERE discord_id = $1", discord_id
         )
     return result.split()[-1] != "0"
-
 
 async def db_get_all_members() -> list[tuple[int, str]]:
     pool = get_pool()
@@ -446,7 +411,6 @@ async def db_get_all_members() -> list[tuple[int, str]]:
         )
     return [(r["discord_id"], r["mc_name"]) for r in rows]
 
-
 async def db_find_by_mc(mc_name: str) -> Optional[int]:
     pool = get_pool()
     async with pool.acquire() as conn:
@@ -454,7 +418,6 @@ async def db_find_by_mc(mc_name: str) -> Optional[int]:
             "SELECT discord_id FROM members WHERE LOWER(mc_name) = LOWER($1)", mc_name
         )
     return row["discord_id"] if row else None
-
 
 # ══════════════════════════════════════════════════════════════════
 # DB HELPERS — TICKET
@@ -467,7 +430,6 @@ async def is_blacklisted(user_id: int) -> bool:
         )
     return row is not None
 
-
 async def count_open_tickets(user_id: int) -> int:
     pool = get_pool()
     async with pool.acquire() as conn:
@@ -475,7 +437,6 @@ async def count_open_tickets(user_id: int) -> int:
             "SELECT COUNT(*) FROM tickets WHERE user_id = $1 AND status = 'open'", user_id
         )
     return val or 0
-
 
 async def check_cooldown(user_id: int) -> int:
     pool = get_pool()
@@ -491,7 +452,6 @@ async def check_cooldown(user_id: int) -> int:
     except (ValueError, AttributeError):
         return 0
 
-
 async def update_cooldown(user_id: int) -> None:
     pool = get_pool()
     async with pool.acquire() as conn:
@@ -503,7 +463,6 @@ async def update_cooldown(user_id: int) -> None:
             user_id,
         )
 
-
 async def get_ticket(channel_id: int) -> Optional[dict]:
     pool = get_pool()
     async with pool.acquire() as conn:
@@ -512,7 +471,6 @@ async def get_ticket(channel_id: int) -> Optional[dict]:
         )
     return dict(row) if row else None
 
-
 async def try_update_last_message(channel_id: int) -> None:
     pool = get_pool()
     async with pool.acquire() as conn:
@@ -520,7 +478,6 @@ async def try_update_last_message(channel_id: int) -> None:
             "UPDATE tickets SET last_message = NOW() WHERE channel_id = $1 AND status = 'open'",
             channel_id,
         )
-
 
 # ══════════════════════════════════════════════════════════════════
 # DB HELPERS — GIVEAWAY
@@ -533,7 +490,6 @@ async def db_get_luck(user_id: int) -> int:
         )
     return val if val is not None else 1
 
-
 async def db_set_luck(user_id: int, factor: int) -> None:
     pool = get_pool()
     async with pool.acquire() as conn:
@@ -544,7 +500,6 @@ async def db_set_luck(user_id: int, factor: int) -> None:
             """,
             user_id, factor,
         )
-
 
 async def db_get_entries_with_luck(g_id: str) -> list[tuple[int, int]]:
     pool = get_pool()
@@ -560,7 +515,6 @@ async def db_get_entries_with_luck(g_id: str) -> list[tuple[int, int]]:
             g_id,
         )
     return [(r["user_id"], r["factor"]) for r in rows]
-
 
 async def db_create_giveaway(
     title: str,
@@ -587,14 +541,12 @@ async def db_create_giveaway(
         )
     return g_id, end_dt
 
-
 async def db_set_message_id(g_id: str, message_id: int) -> None:
     pool = get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE giveaways SET message_id = $1 WHERE id = $2", message_id, g_id
         )
-
 
 async def db_get_giveaway(g_id: str) -> Optional[dict]:
     pool = get_pool()
@@ -604,13 +556,11 @@ async def db_get_giveaway(g_id: str) -> Optional[dict]:
         )
     return dict(row) if row else None
 
-
 async def db_get_daily_mission(date: datetime.date) -> Optional[dict]:
     pool = get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow("SELECT * FROM daily_missions WHERE active_date = $1", date)
     return dict(row) if row else None
-
 
 async def db_create_daily_mission(type: str, target: int, reward: int, date: datetime.date) -> dict:
     pool = get_pool()
@@ -621,7 +571,6 @@ async def db_create_daily_mission(type: str, target: int, reward: int, date: dat
         )
     return dict(row) if row else {}
 
-
 async def db_get_user_mission_progress(user_id: int, mission_id: int) -> Optional[dict]:
     pool = get_pool()
     async with pool.acquire() as conn:
@@ -630,7 +579,6 @@ async def db_get_user_mission_progress(user_id: int, mission_id: int) -> Optiona
             user_id, mission_id
         )
     return dict(row) if row else None
-
 
 async def db_upsert_user_mission_progress(user_id: int, mission_id: int, progress: int, completed: bool) -> None:
     pool = get_pool()
@@ -645,37 +593,6 @@ async def db_upsert_user_mission_progress(user_id: int, mission_id: int, progres
             user_id, mission_id, progress, completed
         )
 
-
-async def db_get_shop_multipliers() -> list[dict]:
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT * FROM shop_multipliers")
-    return [dict(r) for r in rows]
-
-
-async def db_get_user_multipliers(user_id: int) -> list[dict]:
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT sm.name, sm.multiplier, um.remaining_uses FROM user_multipliers um JOIN shop_multipliers sm ON um.multiplier_id = sm.id WHERE um.user_id = $1",
-            user_id
-        )
-    return [dict(r) for r in rows]
-
-
-async def db_add_user_multiplier(user_id: int, multiplier_id: int, uses: int) -> None:
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO user_multipliers (user_id, multiplier_id, remaining_uses)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (user_id, multiplier_id) DO UPDATE
-            SET remaining_uses = user_multipliers.remaining_uses + $3
-            """,
-            user_id, multiplier_id, uses
-        )
-
 async def db_log_edited_message(message_id: int, channel_id: int, guild_id: int, author_id: int, old_content: str, new_content: str) -> None:
     pool = get_pool()
     async with pool.acquire() as conn:
@@ -684,8 +601,6 @@ async def db_log_edited_message(message_id: int, channel_id: int, guild_id: int,
             message_id, channel_id, guild_id, author_id, old_content, new_content
         )
 
-
-
 async def db_log_deleted_message(message_id: int, channel_id: int, guild_id: int, author_id: int, content: str) -> None:
     pool = get_pool()
     async with pool.acquire() as conn:
@@ -693,18 +608,6 @@ async def db_log_deleted_message(message_id: int, channel_id: int, guild_id: int
             "INSERT INTO deleted_messages (id, channel_id, guild_id, author_id, content) VALUES ($1, $2, $3, $4, $5)",
             message_id, channel_id, guild_id, author_id, content
         )
-async def db_decrement_user_multiplier(user_id: int, multiplier_id: int) -> None:
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE user_multipliers SET remaining_uses = remaining_uses - 1 WHERE user_id = $1 AND multiplier_id = $2",
-            user_id, multiplier_id
-        )
-        await conn.execute(
-            "DELETE FROM user_multipliers WHERE user_id = $1 AND multiplier_id = $2 AND remaining_uses <= 0",
-            user_id, multiplier_id
-        )
-
 
 async def db_get_expired_giveaways() -> list[dict]:
     pool = get_pool()
@@ -714,7 +617,6 @@ async def db_get_expired_giveaways() -> list[dict]:
         )
     return [dict(r) for r in rows]
 
-
 async def db_close_giveaway(g_id: str) -> bool:
     pool = get_pool()
     async with pool.acquire() as conn:
@@ -722,7 +624,6 @@ async def db_close_giveaway(g_id: str) -> bool:
             "UPDATE giveaways SET active = FALSE WHERE id = $1 AND active = TRUE", g_id
         )
     return result.split()[-1] != "0"
-
 
 async def db_add_entry(g_id: str, user_id: int) -> bool:
     pool = get_pool()
@@ -735,7 +636,6 @@ async def db_add_entry(g_id: str, user_id: int) -> bool:
     except asyncpg.UniqueViolationError:
         return False
 
-
 async def db_remove_entry(g_id: str, user_id: int) -> bool:
     pool = get_pool()
     async with pool.acquire() as conn:
@@ -743,7 +643,6 @@ async def db_remove_entry(g_id: str, user_id: int) -> bool:
             "DELETE FROM entries WHERE giveaway_id = $1 AND user_id = $2", g_id, user_id
         )
     return result.split()[-1] != "0"
-
 
 async def db_entry_count(g_id: str) -> int:
     pool = get_pool()
@@ -753,7 +652,6 @@ async def db_entry_count(g_id: str) -> int:
         )
     return val or 0
 
-
 async def db_list_active_giveaways() -> list[dict]:
     pool = get_pool()
     async with pool.acquire() as conn:
@@ -761,7 +659,6 @@ async def db_list_active_giveaways() -> list[dict]:
             "SELECT id, title, end_time, winners FROM giveaways WHERE active = TRUE ORDER BY end_time"
         )
     return [dict(r) for r in rows]
-
 
 # ══════════════════════════════════════════════════════════════════
 # DB HELPERS — CASINO
@@ -780,7 +677,6 @@ async def casino_get_user(user_id: int) -> dict:
 async def casino_get_balance(user_id: int) -> int:
     data = await casino_get_user(user_id)
     return data["balance"]
-
 
 async def casino_update_balance(user_id: int, amount: int) -> int:
     pool = get_pool()
@@ -814,15 +710,12 @@ async def casino_update_balance(user_id: int, amount: int) -> int:
             )
         return new_balance
 
-
 async def casino_set_bet(user_id: int, bet: int) -> None:
     pool = get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE casino_users SET bet = $1 WHERE user_id = $2", bet, user_id
         )
-
-
 
 async def casino_record_game(user_id: int, won: bool, prize: int) -> None:
     # This function is used to track games if needed, for now it just logs
@@ -843,7 +736,6 @@ async def db_create_promo(
             """,
             code.upper(), reward, max_uses, expires_at, created_by,
         )
-
 
 async def db_redeem_promo(code: str, user_id: int) -> tuple[bool, str, int]:
     pool = get_pool()
@@ -885,7 +777,6 @@ async def db_redeem_promo(code: str, user_id: int) -> tuple[bool, str, int]:
 
     return True, "✅ Codice riscattato!", row["reward"]
 
-
 # ══════════════════════════════════════════════════════════════════
 # DB HELPERS — PROMO CODES (ELIMINA)  ← MODIFICA
 # ══════════════════════════════════════════════════════════════════
@@ -897,7 +788,6 @@ async def db_delete_promo(code: str) -> bool:
             "DELETE FROM promo_codes WHERE code = $1", code.upper()
         )
     return result.split()[-1] != "0"
-
 
 # ══════════════════════════════════════════════════════════════════
 # DB HELPERS — POLLS
@@ -919,13 +809,11 @@ async def db_create_poll(
                 )
     return p_id
 
-
 async def db_get_poll(p_id: str) -> Optional[dict]:
     pool = get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow("SELECT * FROM polls WHERE id = $1", p_id)
     return dict(row) if row else None
-
 
 async def db_get_poll_options(p_id: str) -> list[dict]:
     pool = get_pool()
@@ -934,7 +822,6 @@ async def db_get_poll_options(p_id: str) -> list[dict]:
             "SELECT * FROM poll_options WHERE poll_id = $1 ORDER BY id", p_id
         )
     return [dict(r) for r in rows]
-
 
 async def db_vote_poll(p_id: str, option_id: int, user_id: int) -> tuple[bool, str]:
     pool = get_pool()
@@ -967,12 +854,10 @@ async def db_vote_poll(p_id: str, option_id: int, user_id: int) -> tuple[bool, s
             )
     return True, "Voto registrato."
 
-
 async def db_close_poll(p_id: str) -> None:
     pool = get_pool()
     async with pool.acquire() as conn:
         await conn.execute("UPDATE polls SET active = FALSE WHERE id = $1", p_id)
-
 
 async def db_set_poll_message(p_id: str, message_id: int) -> None:
     pool = get_pool()
@@ -980,7 +865,6 @@ async def db_set_poll_message(p_id: str, message_id: int) -> None:
         await conn.execute(
             "UPDATE polls SET message_id = $1 WHERE id = $2", message_id, p_id
         )
-
 
 # ══════════════════════════════════════════════════════════════════
 # GIOCHI — SLOT MACHINE
@@ -996,10 +880,8 @@ _POOL: list[str] = [
     sym for sym, data in SYMBOLS.items() for _ in range(data["weight"])
 ]
 
-
 def spin_reels() -> list[str]:
     return [random.choice(_POOL) for _ in range(3)]
-
 
 def evaluate_spin(result: list[str], bet: int) -> tuple[int, str]:
     counts = {s: result.count(s) for s in set(result)}
@@ -1011,23 +893,19 @@ def evaluate_spin(result: list[str], bet: int) -> tuple[int, str]:
         return int(bet * 1.5), f"Coppia di {SYMBOLS[best]['name']} ×1.5"
     return 0, "Nessuna combinazione"
 
-
 # ══════════════════════════════════════════════════════════════════
 # GIOCHI — ROULETTE
 # ══════════════════════════════════════════════════════════════════
 ROULETTE_RED   = {1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36}
 ROULETTE_BLACK = {2,4,6,8,10,11,13,15,17,20,22,24,26,28,29,31,33,35}
 
-
 def roulette_spin() -> int:
     return random.randint(0, 36)
-
 
 def roulette_color(n: int) -> str:
     if n == 0:
         return "🟢"
     return "🔴" if n in ROULETTE_RED else "⚫"
-
 
 def roulette_evaluate(
     bet_type: str, bet_value: str, result: int, bet_amount: int
@@ -1085,7 +963,6 @@ def roulette_evaluate(
 
     return 0, desc + "\n❌ Tipo di scommessa non riconosciuto."
 
-
 # ══════════════════════════════════════════════════════════════════
 # UTILS — CONTROLLI ACCESSO
 # ══════════════════════════════════════════════════════════════════
@@ -1093,7 +970,6 @@ def _has_role_or_admin(member: discord.Member, role_id: int) -> bool:
     if member.guild_permissions.administrator:
         return True
     return bool(role_id) and member.get_role(role_id) is not None
-
 
 def is_ticket_staff(m: discord.Member)      -> bool: return _has_role_or_admin(m, Config.STAFF_TICKET_ROLE_ID)
 def is_casino_staff(m: discord.Member)      -> bool: return _has_role_or_admin(m, Config.STAFF_CASINO_ROLE_ID)
@@ -1104,13 +980,11 @@ def is_partnership_staff(m: discord.Member) -> bool: return _has_role_or_admin(m
 def has_casino_access(m: discord.Member)    -> bool: return _has_role_or_admin(m, Config.CASINO_ROLE_ID)
 def is_high_mod(m: discord.Member)          -> bool: return _has_role_or_admin(m, Config.ROLE_ADMIN_ID)
 
-
 def is_any_staff(m: discord.Member) -> bool:
     return any([
         is_ticket_staff(m), is_casino_staff(m), is_giveaway_staff(m),
         is_team_staff(m), is_mission_staff(m), is_partnership_staff(m), is_high_mod(m),
     ])
-
 
 def _make_staff_check(check_fn, role_id_attr: str):
     async def predicate(interaction: discord.Interaction) -> bool:
@@ -1119,14 +993,12 @@ def _make_staff_check(check_fn, role_id_attr: str):
         raise app_commands.MissingRole(getattr(Config, role_id_attr, 0))
     return app_commands.check(predicate)
 
-
 def ticket_staff_check():      return _make_staff_check(is_ticket_staff,      "STAFF_TICKET_ROLE_ID")
 def casino_staff_check():      return _make_staff_check(is_casino_staff,      "STAFF_CASINO_ROLE_ID")
 def giveaway_staff_check():    return _make_staff_check(is_giveaway_staff,    "STAFF_GIVEAWAY_ROLE_ID")
 def team_staff_check():        return _make_staff_check(is_team_staff,        "STAFF_TEAM_ROLE_ID")
 def mission_staff_check():     return _make_staff_check(is_mission_staff,     "STAFF_MISSION_ROLE_ID")
 def partnership_staff_check(): return _make_staff_check(is_partnership_staff, "STAFF_PARTNERSHIP_ROLE_ID")
-
 
 def casino_access_check():
     async def predicate(interaction: discord.Interaction) -> bool:
@@ -1145,7 +1017,6 @@ def casino_access_check():
         raise app_commands.CheckFailure("Casino role required")
     return app_commands.check(predicate)
 
-
 # ══════════════════════════════════════════════════════════════════
 # UTILS — HELPER GENERICI
 # ══════════════════════════════════════════════════════════════════
@@ -1157,14 +1028,11 @@ def base_embed(title: str, color: int, user: discord.User | discord.Member) -> d
     )
     return embed
 
-
 def coin(n: int) -> str:
     return f"**{n:,}** 🪙"
 
-
 async def get_team_role(guild: discord.Guild) -> Optional[discord.Role]:
     return guild.get_role(Config.TEAM_ROLE_ID)
-
 
 async def safe_add_role(member: discord.Member, role: discord.Role) -> tuple[bool, str]:
     try:
@@ -1175,7 +1043,6 @@ async def safe_add_role(member: discord.Member, role: discord.Role) -> tuple[boo
     except discord.HTTPException as exc:
         return False, f"Errore HTTP: {exc.status}"
 
-
 async def safe_remove_role(member: discord.Member, role: discord.Role) -> tuple[bool, str]:
     try:
         await member.remove_roles(role, reason="Rimosso via bot")
@@ -1184,7 +1051,6 @@ async def safe_remove_role(member: discord.Member, role: discord.Role) -> tuple[
         return False, "Permessi insufficienti."
     except discord.HTTPException as exc:
         return False, f"Errore HTTP: {exc.status}"
-
 
 async def build_transcript(channel: discord.TextChannel) -> Optional[discord.File]:
     if HAS_CHAT_EXPORTER:
@@ -1211,7 +1077,6 @@ async def build_transcript(channel: discord.TextChannel) -> Optional[discord.Fil
     except Exception as e:
         log.error("Fallback transcript fallito per #%s: %s", channel.name, e)
         return None
-
 
 # ══════════════════════════════════════════════════════════════════
 # TICKET — CHIUSURA con countdown e riapri
@@ -1282,7 +1147,6 @@ async def _do_archive_ticket(
             reason=f"Ticket chiuso da {closer} — {reason or 'nessun motivo'}"
         )
 
-
 async def _countdown_and_archive(
     channel: discord.TextChannel,
     closer: discord.Member,
@@ -1300,7 +1164,6 @@ async def _countdown_and_archive(
         log.info("Countdown chiusura annullato per #%s (riaperto)", channel.name)
     finally:
         _ticket_close_tasks.pop(channel.id, None)
-
 
 async def close_ticket(
     channel: discord.TextChannel,
@@ -1344,7 +1207,6 @@ async def close_ticket(
         _countdown_and_archive(channel, closer, guild, force=force, reason=reason)
     )
     _ticket_close_tasks[channel.id] = task
-
 
 class ReopenView(discord.ui.View):
     def __init__(self, channel_id: int, owner_id: int):
@@ -1396,7 +1258,6 @@ class ReopenView(discord.ui.View):
             with contextlib.suppress(discord.HTTPException):
                 await self._close_message.edit(view=self)
 
-
 # ══════════════════════════════════════════════════════════════════
 # GIVEAWAY — embed builder
 # ══════════════════════════════════════════════════════════════════
@@ -1404,7 +1265,6 @@ def _parse_end_time(raw: str | datetime.datetime) -> datetime.datetime:
     if isinstance(raw, str):
         return datetime.datetime.fromisoformat(raw)
     return raw
-
 
 def build_giveaway_embed(
     title: str,
@@ -1439,7 +1299,6 @@ def build_giveaway_embed(
         embed.set_footer(text="Giveaway terminato il")
     return embed
 
-
 async def refresh_giveaway_embed(client: discord.Client, g_id: str, count: int) -> None:
     g = await db_get_giveaway(g_id)
     if not g or not g["message_id"]:
@@ -1461,7 +1320,6 @@ async def refresh_giveaway_embed(client: discord.Client, g_id: str, count: int) 
         msg = await channel.fetch_message(g["message_id"])
         await msg.edit(embed=embed)
 
-
 # ══════════════════════════════════════════════════════════════════
 # MISSIONI
 # ══════════════════════════════════════════════════════════════════
@@ -1469,7 +1327,6 @@ def _make_mission_channel_name(username: str) -> str:
     clean = re.sub(r"[^a-z0-9-]", "-", username.lower())
     clean = re.sub(r"-{2,}", "-", clean).strip("-")
     return f"missione-{clean}"
-
 
 class MissionControl(discord.ui.View):
     def __init__(self):
@@ -1506,7 +1363,6 @@ class MissionControl(discord.ui.View):
         await asyncio.sleep(5)
         with contextlib.suppress(discord.HTTPException, discord.NotFound):
             await interaction.channel.delete()
-
 
 class MissionView(discord.ui.View):
     def __init__(self):
@@ -1618,7 +1474,6 @@ class MissionView(discord.ui.View):
             f"✅ Missione accettata! Il tuo canale privato: {channel.mention}", ephemeral=True
         )
 
-
 # ══════════════════════════════════════════════════════════════════
 # PAGINAZIONE GENERICA
 # ══════════════════════════════════════════════════════════════════
@@ -1710,7 +1565,6 @@ class GiveawayParticipantsView(discord.ui.View):
             with contextlib.suppress(discord.HTTPException):
                 await self._message.edit(view=self)
 
-
 class MemberListView(discord.ui.View):
     def __init__(
         self,
@@ -1777,7 +1631,6 @@ class MemberListView(discord.ui.View):
             with contextlib.suppress(discord.HTTPException):
                 await self._message.edit(view=self)
 
-
 # ══════════════════════════════════════════════════════════════════
 # TEAM — MODAL
 # ══════════════════════════════════════════════════════════════════
@@ -1838,7 +1691,6 @@ class AddMemberModal(discord.ui.Modal, title="Aggiungi Membro al Team"):
             await interaction.followup.send(msg, ephemeral=True)
         else:
             await interaction.response.send_message(msg, ephemeral=True)
-
 
 # ══════════════════════════════════════════════════════════════════
 # CANDIDATURA STAFF — MODAL & REVIEW
@@ -1917,7 +1769,6 @@ class StaffApplicationModal(discord.ui.Modal, title="📋 Candidatura Staff"):
             await interaction.followup.send(msg, ephemeral=True)
         else:
             await interaction.response.send_message(msg, ephemeral=True)
-
 
 class StaffApplicationReviewView(discord.ui.View):
     def __init__(self, applicant: discord.Member, channel: discord.TextChannel):
@@ -2012,7 +1863,6 @@ class StaffApplicationReviewView(discord.ui.View):
         if ticket and ticket["status"] == "open":
             await close_ticket(self.channel, interaction.user, interaction.guild, reason="Candidatura rifiutata")
 
-
 # ══════════════════════════════════════════════════════════════════
 # PARTNERSHIP — MODAL & REVIEW
 # ══════════════════════════════════════════════════════════════════
@@ -2088,7 +1938,6 @@ class JoinTeamModal(discord.ui.Modal, title="🎮 Unisciti al Team"):
             await interaction.followup.send(msg, ephemeral=True)
         else:
             await interaction.response.send_message(msg, ephemeral=True)
-
 
 class JoinTeamReviewView(discord.ui.View):
     def __init__(self, applicant: discord.Member, channel: discord.TextChannel):
@@ -2178,7 +2027,6 @@ class JoinTeamReviewView(discord.ui.View):
         if ticket and ticket["status"] == "open":
             await close_ticket(self.channel, interaction.user, interaction.guild, reason="Candidatura team rifiutata")
 
-
 class JoinTeamStartView(discord.ui.View):
     def __init__(self, applicant: discord.Member | discord.User, channel: discord.TextChannel):
         super().__init__(timeout=3600)
@@ -2211,7 +2059,6 @@ class JoinTeamStartView(discord.ui.View):
     async def on_timeout(self) -> None:
         for item in self.children:
             item.disabled = True
-
 
 class PartnershipModal(discord.ui.Modal, title="🤝 Richiesta di Partnership"):
     server_name  = discord.ui.TextInput(label="Nome Server/Progetto",                           min_length=3,  max_length=100)
@@ -2271,7 +2118,6 @@ class PartnershipModal(discord.ui.Modal, title="🤝 Richiesta di Partnership"):
             await interaction.followup.send(msg, ephemeral=True)
         else:
             await interaction.response.send_message(msg, ephemeral=True)
-
 
 class PartnershipReviewView(discord.ui.View):
     def __init__(
@@ -2403,7 +2249,6 @@ class PartnershipReviewView(discord.ui.View):
         if ticket and ticket["status"] == "open":
             await close_ticket(self.channel, interaction.user, interaction.guild, reason="Partnership rifiutata")
 
-
 class PartnershipStartView(discord.ui.View):
     def __init__(self, applicant: discord.Member | discord.User, channel: discord.TextChannel):
         super().__init__(timeout=3600)
@@ -2436,7 +2281,6 @@ class PartnershipStartView(discord.ui.View):
     async def on_timeout(self) -> None:
         for item in self.children:
             item.disabled = True  # type: ignore[attr-defined]
-
 
 # ══════════════════════════════════════════════════════════════════
 # TICKET — VIEWS & MODALS
@@ -2475,7 +2319,6 @@ class RatingView(discord.ui.View):
             )
         return cb
 
-
 class CategorySelect(discord.ui.Select):
     def __init__(self):
         super().__init__(
@@ -2492,7 +2335,6 @@ class CategorySelect(discord.ui.Select):
             if isinstance(item, PrioritySelect):
                 item.disabled = False
         await interaction.response.edit_message(view=self.view)
-
 
 class PrioritySelect(discord.ui.Select):
     def __init__(self):
@@ -2515,7 +2357,6 @@ class PrioritySelect(discord.ui.Select):
                 item.disabled = False
         await interaction.response.edit_message(view=self.view)
 
-
 class ConfirmButton(discord.ui.Button):
     def __init__(self):
         super().__init__(
@@ -2531,7 +2372,6 @@ class ConfirmButton(discord.ui.Button):
             TicketModal(self.view.categoria, self.view.priority)
         )
 
-
 class TicketOpenView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=120)
@@ -2540,7 +2380,6 @@ class TicketOpenView(discord.ui.View):
         self.add_item(CategorySelect())
         self.add_item(PrioritySelect())
         self.add_item(ConfirmButton())
-
 
 class TicketModal(discord.ui.Modal):
     mc_name = discord.ui.TextInput(
@@ -2671,7 +2510,6 @@ class TicketModal(discord.ui.Modal):
                 allowed_mentions=discord.AllowedMentions(roles=True),
             )
 
-
         if self.categoria == "Candidatura Staff":
             await channel.send(
                 embed=discord.Embed(
@@ -2711,7 +2549,6 @@ class TicketModal(discord.ui.Modal):
         else:
             await interaction.followup.send(msg, ephemeral=True)
 
-
 class StaffApplicationStartView(discord.ui.View):
     def __init__(self, applicant: discord.Member | discord.User, channel: discord.TextChannel):
         super().__init__(timeout=3600)
@@ -2744,7 +2581,6 @@ class StaffApplicationStartView(discord.ui.View):
     async def on_timeout(self) -> None:
         for item in self.children:
             item.disabled = True  # type: ignore[attr-defined]
-
 
 class TicketAssignModal(discord.ui.Modal, title="📋 Assegna Ticket"):
     nota_interna = discord.ui.TextInput(
@@ -2811,7 +2647,6 @@ class TicketAssignModal(discord.ui.Modal, title="📋 Assegna Ticket"):
         else:
             await interaction.response.send_message(msg, ephemeral=True)
 
-
 class TicketControlView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -2871,7 +2706,6 @@ class TicketControlView(discord.ui.View):
             ephemeral=True,
         )
 
-
 class CloseReasonModal(discord.ui.Modal, title="Chiudi Ticket"):
     motivo = discord.ui.TextInput(
         label="Motivo di chiusura",
@@ -2891,7 +2725,6 @@ class CloseReasonModal(discord.ui.Modal, title="Chiudi Ticket"):
             reason=self.motivo.value or "Nessun motivo specificato",
         )
 
-
 class AddUserModal(discord.ui.Modal, title="Aggiungi Utente al Ticket"):
     user_id_input = discord.ui.TextInput(
         label="User ID",
@@ -2909,7 +2742,6 @@ class AddUserModal(discord.ui.Modal, title="Aggiungi Utente al Ticket"):
             member, read_messages=True, send_messages=True, attach_files=True
         )
         await interaction.response.send_message(f"{member.mention} aggiunto al ticket.")
-
 
 class ChangePriorityView(discord.ui.View):
     def __init__(self, channel_id: int):
@@ -2948,7 +2780,6 @@ class ChangePriorityView(discord.ui.View):
             )
         )
 
-
 class MainPersistentView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -2978,7 +2809,6 @@ class MainPersistentView(discord.ui.View):
             view=TicketOpenView(),
             ephemeral=True,
         )
-
 
 # ══════════════════════════════════════════════════════════════════
 # ANNUNCIO — MODAL
@@ -3033,7 +2863,6 @@ class AnnuncioModal(discord.ui.Modal, title="📢 Crea Annuncio"):
         else:
             await interaction.response.send_message(msg, ephemeral=True)
 
-
 # ══════════════════════════════════════════════════════════════════
 # SONDAGGI — VIEW & EMBED
 # ══════════════════════════════════════════════════════════════════
@@ -3054,7 +2883,6 @@ def _build_poll_embed(poll: dict, options: list[dict], closed: bool = False) -> 
     embed.description = "\n\n".join(lines) if lines else "*Nessuna opzione.*"
     embed.set_footer(text=f"{'Sondaggio chiuso' if closed else 'Vota!'} • Totale: {total_votes}")
     return embed
-
 
 class PollView(discord.ui.View):
     def __init__(self, poll_id: str, options: list[dict]):
@@ -3087,7 +2915,6 @@ class PollView(discord.ui.View):
                 f"✅ {msg}" if ok else f"ℹ️ {msg}", ephemeral=True
             )
         return cb
-
 
 # ══════════════════════════════════════════════════════════════════
 # GIVEAWAY — VIEWS & MODALS
@@ -3139,7 +2966,6 @@ class GiveawayModal(discord.ui.Modal, title="Crea un Giveaway"):
             await interaction.followup.send(msg, ephemeral=True)
         else:
             await interaction.response.send_message(msg, ephemeral=True)
-
 
 class GiveawayView(discord.ui.View):
     def __init__(self, giveaway_id: Optional[str]):
@@ -3214,7 +3040,6 @@ class GiveawayView(discord.ui.View):
                 f"👥 Ci sono **{count}** partecipanti.", ephemeral=True
             )
 
-
 class LeaveView(discord.ui.View):
     def __init__(self, giveaway_id: str):
         super().__init__(timeout=120)
@@ -3240,7 +3065,6 @@ class LeaveView(discord.ui.View):
         if self._message:
             with contextlib.suppress(discord.HTTPException):
                 await self._message.edit(view=self)
-
 
 # ══════════════════════════════════════════════════════════════════
 # COG — TEAM
@@ -3307,7 +3131,6 @@ class TeamCog(commands.Cog):
             color=discord.Color.blurple(),
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
-
 
 # ══════════════════════════════════════════════════════════════════
 # COG — TICKET
@@ -3672,7 +3495,6 @@ class TicketCog(commands.Cog):
     async def before_auto_close(self):
         await self.bot.wait_until_ready()
 
-
 # ══════════════════════════════════════════════════════════════════
 # COG — MISSIONI
 # ══════════════════════════════════════════════════════════════════
@@ -3713,7 +3535,6 @@ class MissionCog(commands.Cog):
         )
         await interaction.channel.send(embed=embed, view=MissionView())
         await interaction.response.send_message("✅ Missione pubblicata!", ephemeral=True)
-
 
 # ══════════════════════════════════════════════════════════════════
 # COG — GIVEAWAY
@@ -3938,7 +3759,6 @@ class GiveawayCog(commands.Cog):
         embed.set_footer(text="Usa /giveaway_partecipanti <id> per i dettagli")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-
 # ══════════════════════════════════════════════════════════════════
 # COG — CASINO
 # ══════════════════════════════════════════════════════════════════
@@ -3959,26 +3779,16 @@ class ShopCog(commands.Cog):
         embed.set_footer(text=f"Il tuo saldo: {coin(await casino_get_balance(interaction.user.id))}")
         await interaction.response.send_message(embed=embed, view=ShopView(self.bot), ephemeral=True)
 
-
 class ShopView(discord.ui.View):
     def __init__(self, bot: "CombinedBot"):
         super().__init__(timeout=180)
         self.bot = bot
         self.add_item(ShopSelect(bot))
 
-
 class ShopSelect(discord.ui.Select):
     def __init__(self, bot: "CombinedBot"):
         self.bot = bot
         options = []
-
-        # Add multipliers to options
-        for i, item in enumerate(Config.SHOP_MULTIPLIERS):
-            options.append(discord.SelectOption(
-                label=f"{item['name']} ({coin(item['cost'])})",
-                value=f"multiplier_{i}",
-                description=f"Moltiplicatore x{item['multiplier']} per {item['uses']} giocate."
-            ))
 
         # Add roles to options
         for i, item in enumerate(Config.SHOP_ROLES):
@@ -4003,27 +3813,7 @@ class ShopSelect(discord.ui.Select):
         balance = await casino_get_balance(user_id)
         selected_value = self.values[0]
 
-        if selected_value.startswith("multiplier_"):
-            index = int(selected_value.split("_")[1])
-            item = Config.SHOP_MULTIPLIERS[index]
-            item_cost = item['cost']
-
-            if balance < item_cost:
-                return await interaction.response.send_message(
-                    f"❌ Non hai abbastanza monete per acquistare {item['name']}. Saldo: {coin(balance)}",
-                    ephemeral=True
-                )
-
-            await casino_update_balance(user_id, -item_cost)
-            # Assuming multiplier_id is the index for now, will update if actual IDs are used
-            await db_add_user_multiplier(user_id, index, item['uses'])
-
-            await interaction.response.send_message(
-                f"✅ Hai acquistato **{item['name']}** per {coin(item_cost)}! Il tuo nuovo saldo è {coin(await casino_get_balance(user_id))}.",
-                ephemeral=True
-            )
-
-        elif selected_value.startswith("role_"):
+        if selected_value.startswith("role_"):
             index = int(selected_value.split("_")[1])
             item = Config.SHOP_ROLES[index]
             item_cost = item['cost']
@@ -4056,7 +3846,6 @@ class ShopSelect(discord.ui.Select):
                     f"❌ Errore nell'assegnazione del ruolo: {err}. Contatta un amministratore.",
                     ephemeral=True
                 )
-
 
 class CasinoCog(commands.Cog):
     def __init__(self, bot: "CombinedBot"):
@@ -4104,26 +3893,6 @@ class CasinoCog(commands.Cog):
         result       = spin_reels()
         prize, label = evaluate_spin(result, bet)
         won          = prize > 0
-
-        # Apply multipliers
-        user_multipliers = await db_get_user_multipliers(uid)
-        active_multiplier = 1.0
-        multiplier_id = None
-        for i, m in enumerate(Config.SHOP_MULTIPLIERS):
-            for user_m in user_multipliers:
-                if user_m["name"] == m["name"] and user_m["remaining_uses"] > 0:
-                    active_multiplier = m["multiplier"]
-                    multiplier_id = i # Assuming index as ID for now
-                    break
-            if multiplier_id is not None: break
-
-        if active_multiplier > 1.0 and prize > 0:
-            prize = int(prize * active_multiplier)
-            label += f" (x{active_multiplier} Moltiplicatore!)"
-            if multiplier_id is not None:
-                await db_decrement_user_multiplier(uid, multiplier_id)
-
-
 
         if won:
             new_bal = await casino_update_balance(uid, prize)
@@ -4175,24 +3944,6 @@ class CasinoCog(commands.Cog):
         outcome = scelta if won else ("testa" if scelta == "croce" else "croce")
         icon    = "🦅" if outcome == "testa" else "🏛️"
 
-        # Apply multipliers
-        user_multipliers = await db_get_user_multipliers(uid)
-        active_multiplier = 1.0
-        multiplier_id = None
-        for i, m in enumerate(Config.SHOP_MULTIPLIERS):
-            for user_m in user_multipliers:
-                if user_m["name"] == m["name"] and user_m["remaining_uses"] > 0:
-                    active_multiplier = m["multiplier"]
-                    multiplier_id = i # Assuming index as ID for now
-                    break
-            if multiplier_id is not None: break
-
-        if active_multiplier > 1.0 and won:
-            puntata = int(puntata * active_multiplier)
-            if multiplier_id is not None:
-                await db_decrement_user_multiplier(uid, multiplier_id)
-
-
         if won:
             new_bal = await casino_update_balance(uid, puntata * 2)
             # Multiplier applied to puntata, so prize is puntata * 2
@@ -4238,25 +3989,6 @@ class CasinoCog(commands.Cog):
         result        = roulette_spin()
         prize, detail = roulette_evaluate(tipo, valore, result, puntata)
         won           = prize > 0
-
-        # Apply multipliers
-        user_multipliers = await db_get_user_multipliers(uid)
-        active_multiplier = 1.0
-        multiplier_id = None
-        for i, m in enumerate(Config.SHOP_MULTIPLIERS):
-            for user_m in user_multipliers:
-                if user_m["name"] == m["name"] and user_m["remaining_uses"] > 0:
-                    active_multiplier = m["multiplier"]
-                    multiplier_id = i # Assuming index as ID for now
-                    break
-            if multiplier_id is not None: break
-
-        if active_multiplier > 1.0 and won:
-            prize = int(prize * active_multiplier)
-            detail += f" (x{active_multiplier} Moltiplicatore!)"
-            if multiplier_id is not None:
-                await db_decrement_user_multiplier(uid, multiplier_id)
-
 
         if won:
             new_bal = await casino_update_balance(uid, prize)
@@ -4650,7 +4382,6 @@ class CasinoCog(commands.Cog):
         else:
             await interaction.response.send_message(f"❌ Errore: {err}", ephemeral=True)
 
-
 # ══════════════════════════════════════════════════════════════════
 # View paginazione per lista codici promo
 # ══════════════════════════════════════════════════════════════════
@@ -4695,7 +4426,6 @@ class PromoCodesPageView(discord.ui.View):
         if self._message:
             with contextlib.suppress(discord.HTTPException):
                 await self._message.edit(view=self)
-
 
 # ══════════════════════════════════════════════════════════════════
 # COG — SONDAGGI
@@ -4771,7 +4501,6 @@ class PollCog(commands.Cog):
 
         await interaction.response.send_message("✅ Sondaggio chiuso.", ephemeral=True)
 
-
 # ══════════════════════════════════════════════════════════════════
 # COG — AFK
 # ══════════════════════════════════════════════════════════════════
@@ -4841,7 +4570,6 @@ class AfkCog(commands.Cog):
                         delete_after=15,
                     )
 
-
 # ══════════════════════════════════════════════════════════════════
 # COG — COMUNICAZIONI  ← MODIFICA: usa send() del bot, no webhook
 # ══════════════════════════════════════════════════════════════════
@@ -4903,7 +4631,6 @@ class ComunicazioniCog(commands.Cog):
             f"✅ Messaggio inviato in {target.mention}.",
             ephemeral=True,
         )
-
 
 # ══════════════════════════════════════════════════════════════════
 # COG — HELP
@@ -5084,7 +4811,6 @@ class HelpCog(commands.Cog):
         )
         await interaction.response.send_message(embed=overview, view=help_view, ephemeral=True)
 
-
 # ══════════════════════════════════════════════════════════════════
 # BOT PRINCIPALE
 # ══════════════════════════════════════════════════════════════════
@@ -5238,7 +4964,6 @@ class CombinedBot(commands.Bot):
             await _db_pool.close()
             log.info("Pool PostgreSQL chiuso.")
         await super().close()
-
 
 # ══════════════════════════════════════════════════════════════════
 # ENTRY POINT
