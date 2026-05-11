@@ -107,8 +107,8 @@ class Config:
     MISSION_MESSAGE_COUNT_REWARD = 100
 
     SHOP_MULTIPLIERS = [
-        {"name": "x1.5 per 5 giocate", "multiplier": 1.5, "uses": 5, "cost": 200},
-        {"name": "x2.0 per 3 giocate", "multiplier": 2.0, "uses": 3, "cost": 500},
+        {"name": "x1.5 per 5 giocate", "multiplier": 1.5, "uses": 5, "cost": 500},
+        {"name": "x2.0 per 3 giocate", "multiplier": 2.0, "uses": 3, "cost": 1000},
     ]
     SHOP_ROLES = [
         {"name": "Ruolo VIP Bronzo", "role_id": 1503399636713603244, "cost": 2000},
@@ -829,15 +829,12 @@ async def casino_update_balance(user_id: int, amount: int) -> int:
             WHERE user_id = $2
             RETURNING balance
             """,
-            delta, user_id,
+            amount, user_id,
         )
-    return val or 0
+        new_balance = row["balance"]
 
-
-async def casino_record_game(user_id: int, won: bool, prize: int) -> None:
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        if won:
+        # Update win statistics only if amount is positive (a win)
+        if amount > 0:
             await conn.execute(
                 """
                 UPDATE casino_users
@@ -846,13 +843,9 @@ async def casino_record_game(user_id: int, won: bool, prize: int) -> None:
                     biggest_win = GREATEST(biggest_win, $1)
                 WHERE user_id = $2
                 """,
-                prize, user_id,
+                amount, user_id,
             )
-        else:
-            await conn.execute(
-                "UPDATE casino_users SET total_games = total_games + 1 WHERE user_id = $1",
-                user_id,
-            )
+        return new_balance
 
 
 async def casino_set_bet(user_id: int, bet: int) -> None:
