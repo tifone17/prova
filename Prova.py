@@ -3766,12 +3766,12 @@ class ShopCog(commands.Cog):
     def __init__(self, bot: "CombinedBot"):
         self.bot = bot
 
-    @app_commands.command(name="negozio_fluxt", description="🛍️ Negozio FluxT - Acquista ruoli esclusivi con le tue monete")
+    @app_commands.command(name="shop", description="🛍️ Negozio FluxT - Acquista ruoli esclusivi con le tue monete")
     @app_commands.guild_only()
     @casino_access_check()
     async def shop_cmd(self, interaction: discord.Interaction):
         embed = discord.Embed(
-            title="🛍️ Negozio di MetaMC",
+            title="🛍️ Negozio FluxT",
             description="Scegli cosa vuoi acquistare con le tue monete del casinò.",
             color=Config.COLOR_PURPLE,
             timestamp=utcnow(),
@@ -4664,7 +4664,7 @@ class HelpCog(commands.Cog):
                 "title": "🛍️ Shop",
                 "color": Config.COLOR_PURPLE,
                 "commands": [
-                    ("/negozio_fluxt", "Ruolo Casino", "Negozio FluxT - Acquista ruoli esclusivi"),
+                    ("/shop", "Ruolo Casino", "Negozio FluxT - Acquista ruoli esclusivi"),
                 ],
             },
             {
