@@ -102,7 +102,7 @@ class Config:
     DAILY_BONUS_MAX     = 200
     COINFLIP_WIN_CHANCE = 40
 
-    MISSION_CHANNEL_ID          = 0 # ID del canale dove annunciare le missioni
+    MISSION_CHANNEL_ID          = 1503400533103476866 # ID del canale dove annunciare le missioni
     MISSION_MESSAGE_COUNT_TARGET = 50
     MISSION_MESSAGE_COUNT_REWARD = 100
 
