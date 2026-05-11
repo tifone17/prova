@@ -355,14 +355,7 @@ async def init_db() -> None:
                 PRIMARY KEY (user_id, multiplier_id)
             );
 
-            CREATE TABLE IF NOT EXISTS canned_responses (
-                code TEXT PRIMARY KEY,
-                content TEXT NOT NULL,
-                created_by BIGINT NOT NULL,
-                created_at TIMESTAMP DEFAULT NOW()
-            );
-
-            CREATE TABLE IF NOT EXISTS deleted_messages (
+            CREATE TABLE IF NOT EXISTS polls (
                 id BIGINT PRIMARY KEY,
                 channel_id BIGINT NOT NULL,
                 guild_id BIGINT NOT NULL,
@@ -678,45 +671,6 @@ async def db_add_user_multiplier(user_id: int, multiplier_id: int, uses: int) ->
             """,
             user_id, multiplier_id, uses
         )
-
-
-async def db_get_canned_response(code: str) -> Optional[dict]:
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM canned_responses WHERE code = $1", code)
-    return dict(row) if row else None
-
-
-async def db_get_all_canned_responses() -> list[dict]:
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT * FROM canned_responses ORDER BY code")
-    return [dict(r) for r in rows]
-
-
-async def db_add_canned_response(code: str, content: str, created_by: int) -> None:
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO canned_responses (code, content, created_by) VALUES ($1, $2, $3)",
-            code, content, created_by
-        )
-
-
-async def db_delete_canned_response(code: str) -> None:
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute("DELETE FROM canned_responses WHERE code = $1", code)
-
-
-async def db_log_deleted_message(message_id: int, channel_id: int, guild_id: int, author_id: int, content: str) -> None:
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO deleted_messages (id, channel_id, guild_id, author_id, content) VALUES ($1, $2, $3, $4, $5)",
-            message_id, channel_id, guild_id, author_id, content
-        )
-
 
 async def db_log_edited_message(message_id: int, channel_id: int, guild_id: int, author_id: int, old_content: str, new_content: str) -> None:
     pool = get_pool()
@@ -4807,66 +4761,6 @@ class PollCog(commands.Cog):
 # ══════════════════════════════════════════════════════════════════
 # COG — AFK
 # ══════════════════════════════════════════════════════════════════
-class CannedResponsesCog(commands.Cog):
-    def __init__(self, bot: "CombinedBot"):
-        self.bot = bot
-
-    @app_commands.command(name="risposta_aggiungi", description="[Staff] Aggiunge una risposta rapida")
-    @app_commands.describe(codice="Codice identificativo (es. regole)", contenuto="Contenuto della risposta")
-    @app_commands.guild_only()
-    @ticket_staff_check()
-    async def add_canned_response_cmd(self, interaction: discord.Interaction, codice: str, contenuto: str):
-        codice = codice.lower().strip()
-        if await db_get_canned_response(codice):
-            return await interaction.response.send_message("❌ Esiste già una risposta rapida con questo codice.", ephemeral=True)
-
-        await db_add_canned_response(codice, contenuto, interaction.user.id)
-        await interaction.response.send_message(f"✅ Risposta rapida `{codice}` aggiunta con successo.", ephemeral=True)
-
-    @app_commands.command(name="risposta_rimuovi", description="[Staff] Rimuove una risposta rapida")
-    @app_commands.describe(codice="Codice della risposta da rimuovere")
-    @app_commands.guild_only()
-    @ticket_staff_check()
-    async def remove_canned_response_cmd(self, interaction: discord.Interaction, codice: str):
-        codice = codice.lower().strip()
-        if not await db_get_canned_response(codice):
-            return await interaction.response.send_message("❌ Nessuna risposta rapida trovata con questo codice.", ephemeral=True)
-
-        await db_delete_canned_response(codice)
-        await interaction.response.send_message(f"✅ Risposta rapida `{codice}` rimossa con successo.", ephemeral=True)
-
-    @app_commands.command(name="risposte_lista", description="[Staff] Mostra tutte le risposte rapide")
-    @app_commands.guild_only()
-    @ticket_staff_check()
-    async def list_canned_responses_cmd(self, interaction: discord.Interaction):
-        responses = await db_get_all_canned_responses()
-        if not responses:
-            return await interaction.response.send_message("ℹ️ Nessuna risposta rapida configurata.", ephemeral=True)
-
-        embed = discord.Embed(
-            title="📚 Risposte Rapide Disponibili",
-            color=Config.COLOR_INFO,
-            timestamp=utcnow(),
-        )
-        description = ""
-        for r in responses:
-            description += f"**`{r['code']}`**: {r['content'][:100]}...\n"
-        embed.description = description
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @app_commands.command(name="risposta_usa", description="[Staff] Invia una risposta rapida nel canale corrente")
-    @app_commands.describe(codice="Codice della risposta da usare")
-    @app_commands.guild_only()
-    @ticket_staff_check()
-    async def use_canned_response_cmd(self, interaction: discord.Interaction, codice: str):
-        codice = codice.lower().strip()
-        response = await db_get_canned_response(codice)
-        if not response:
-            return await interaction.response.send_message("❌ Nessuna risposta rapida trovata con questo codice.", ephemeral=True)
-
-        await interaction.response.send_message(response["content"])
-
-
 class AfkCog(commands.Cog):
     def __init__(self, bot: "CombinedBot"):
         self.bot = bot
@@ -5031,16 +4925,6 @@ class HelpCog(commands.Cog):
                 ],
             },
             {
-                "title": "💬 Risposte Rapide",
-                "color": Config.COLOR_INFO,
-                "commands": [
-                    ("/risposta_aggiungi", "Staff Ticket", "Aggiunge una risposta rapida"),
-                    ("/risposta_rimuovi",  "Staff Ticket", "Rimuove una risposta rapida"),
-                    ("/risposte_lista",    "Staff Ticket", "Mostra tutte le risposte rapide"),
-                    ("/risposta_usa",      "Staff Ticket", "Invia una risposta rapida nel canale"),
-                ],
-            },
-            {
                 "title": "🤝 Partnership",
                 "color": 0x1ABC9C,
                 "commands": [
@@ -5176,7 +5060,6 @@ class HelpCog(commands.Cog):
                 "📊 Sondaggi\n"
                 "💤 Sistema AFK\n"
                 "📣 Comunicazioni (scrivi con il profilo del bot)\n"
-                "💬 Risposte Rapide (per lo staff)\n"
             ),
             color=0x5865F2,
             timestamp=utcnow(),
@@ -5220,7 +5103,6 @@ class CombinedBot(commands.Bot):
         await self.add_cog(MissionCog(self))
         await self.add_cog(PollCog(self))
         await self.add_cog(AfkCog(self))
-        await self.add_cog(CannedResponsesCog(self))
         await self.add_cog(ComunicazioniCog(self))
         await self.add_cog(HelpCog(self))
 
