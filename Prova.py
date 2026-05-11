@@ -359,7 +359,7 @@ async def init_db() -> None:
                 PRIMARY KEY (user_id, multiplier_id)
             );
 
-            CREATE TABLE IF NOT EXISTS polls (
+            CREATE TABLE IF NOT EXISTS deleted_messages (
                 id BIGINT PRIMARY KEY,
                 channel_id BIGINT NOT NULL,
                 guild_id BIGINT NOT NULL,
@@ -685,6 +685,14 @@ async def db_log_edited_message(message_id: int, channel_id: int, guild_id: int,
         )
 
 
+
+async def db_log_deleted_message(message_id: int, channel_id: int, guild_id: int, author_id: int, content: str) -> None:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO deleted_messages (id, channel_id, guild_id, author_id, content) VALUES ($1, $2, $3, $4, $5)",
+            message_id, channel_id, guild_id, author_id, content
+        )
 async def db_decrement_user_multiplier(user_id: int, multiplier_id: int) -> None:
     pool = get_pool()
     async with pool.acquire() as conn:
@@ -815,6 +823,10 @@ async def casino_set_bet(user_id: int, bet: int) -> None:
         )
 
 
+
+async def casino_record_game(user_id: int, won: bool, prize: int) -> None:
+    # This function is used to track games if needed, for now it just logs
+    log.info(f"Casino game: user {user_id}, won: {won}, prize: {prize}")
 # ══════════════════════════════════════════════════════════════════
 # DB HELPERS — PROMO CODES
 # ══════════════════════════════════════════════════════════════════
@@ -4106,7 +4118,6 @@ class CasinoCog(commands.Cog):
             if multiplier_id is not None: break
 
         if active_multiplier > 1.0 and prize > 0:
-            original_prize = prize
             prize = int(prize * active_multiplier)
             label += f" (x{active_multiplier} Moltiplicatore!)"
             if multiplier_id is not None:
@@ -4116,7 +4127,6 @@ class CasinoCog(commands.Cog):
 
         if won:
             new_bal = await casino_update_balance(uid, prize)
-            net     = prize - bet
             embed   = base_embed("🎰 Slot Machine", Config.COLOR_WIN, interaction.user)
             embed.description = (
                 f"## {' ｜ '.join(result)}\n\n"
@@ -4242,7 +4252,6 @@ class CasinoCog(commands.Cog):
             if multiplier_id is not None: break
 
         if active_multiplier > 1.0 and won:
-            original_prize = prize
             prize = int(prize * active_multiplier)
             detail += f" (x{active_multiplier} Moltiplicatore!)"
             if multiplier_id is not None:
