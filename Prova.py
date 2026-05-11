@@ -119,6 +119,7 @@ class Config:
         "Report Utente",
         "Partnership",
         "Candidatura Staff",
+        "Unisciti al Team",
         "Altro",
     ]
     PRIORITY_LEVELS = ["Bassa", "Media", "Alta", "Urgente"]
@@ -1844,6 +1845,207 @@ class StaffApplicationReviewView(discord.ui.View):
 # ══════════════════════════════════════════════════════════════════
 # PARTNERSHIP — MODAL & REVIEW
 # ══════════════════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════════════════
+# UNISCITI AL TEAM — MODAL & REVIEW
+# ══════════════════════════════════════════════════════════════════
+class JoinTeamModal(discord.ui.Modal, title="🎮 Unisciti al Team"):
+    eta = discord.ui.TextInput(
+        label="Età",
+        placeholder="Inserisci la tua età",
+        min_length=1, max_length=3,
+    )
+    motivazione = discord.ui.TextInput(
+        label="Perché vuoi entrare nel team?",
+        style=discord.TextStyle.paragraph,
+        placeholder="Descrivi la tua motivazione...",
+        min_length=20, max_length=1000,
+    )
+    vip_metamc = discord.ui.TextInput(
+        label="Che VIP possiedi sulla survival di MetaMC?",
+        placeholder="Es: VIP, VIP+, MVP, Nessuno...",
+        max_length=100,
+    )
+
+    def __init__(self, channel: discord.TextChannel, applicant: discord.Member):
+        super().__init__()
+        self.channel   = channel
+        self.applicant = applicant
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        eta_str = self.eta.value.strip()
+        if not eta_str.isdigit() or not (10 <= int(eta_str) <= 99):
+            return await interaction.response.send_message(
+                "❌ Inserisci un'età valida.", ephemeral=True
+            )
+        eta_val = int(eta_str)
+        await interaction.response.defer(ephemeral=True)
+
+        embed = discord.Embed(
+            title="🎮 Candidatura Team Ricevuta",
+            color=discord.Color.green(),
+            timestamp=utcnow(),
+        )
+        embed.set_author(
+            name=f"Candidatura di {self.applicant.display_name}",
+            icon_url=self.applicant.display_avatar.url,
+        )
+        embed.add_field(name="👤 Candidato",  value=self.applicant.mention, inline=True)
+        embed.add_field(name="🎂 Età",         value=str(eta_val),           inline=True)
+        embed.add_field(name="💎 VIP MetaMC",  value=self.vip_metamc.value,  inline=True)
+        embed.add_field(name="💬 Motivazione", value=self.motivazione.value, inline=False)
+        embed.set_footer(text="Lo staff del team può accettare o rifiutare.")
+
+        team_role = self.channel.guild.get_role(Config.STAFF_TEAM_ROLE_ID)
+        mention   = team_role.mention if team_role else "**@Staff Team**"
+
+        await self.channel.send(
+            content=f"{mention} — nuova candidatura per il Team!",
+            embed=embed,
+            view=JoinTeamReviewView(applicant=self.applicant, channel=self.channel),
+            allowed_mentions=discord.AllowedMentions(roles=True),
+        )
+        await interaction.followup.send(
+            "✅ La tua candidatura per il Team è stata inviata!",
+            ephemeral=True,
+        )
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        log.exception("Errore in JoinTeamModal: %s", error)
+        msg = "❌ Errore imprevisto."
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+
+
+class JoinTeamReviewView(discord.ui.View):
+    def __init__(self, applicant: discord.Member, channel: discord.TextChannel):
+        super().__init__(timeout=None)
+        self.applicant = applicant
+        self.channel   = channel
+        self._decided  = False
+
+    async def _check_perm(self, interaction: discord.Interaction) -> bool:
+        if is_team_staff(interaction.user):
+            return True
+        await interaction.response.send_message(
+            "❌ Solo lo **Staff Team** può gestire queste candidature.", ephemeral=True
+        )
+        return False
+
+    @discord.ui.button(label="✅ ACCETTA", style=discord.ButtonStyle.success, custom_id="join_team_accept_v17")
+    async def accept_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check_perm(interaction) or self._decided:
+            if self._decided:
+                await interaction.response.send_message("⚠️ Già gestita.", ephemeral=True)
+            return
+        self._decided = True
+
+        team_role = interaction.guild.get_role(Config.TEAM_ROLE_ID)
+        role_msg  = ""
+        if team_role:
+            ok, err  = await safe_add_role(self.applicant, team_role)
+            role_msg = f"✅ Ruolo {team_role.mention} assegnato." if ok else f"⚠️ {err}"
+        else:
+            role_msg = f"⚠️ Ruolo Team (ID `{Config.TEAM_ROLE_ID}`) non trovato."
+
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(view=self)
+
+        await self.channel.send(
+            embed=discord.Embed(
+                title="🎉 Benvenuto nel Team!",
+                description=(
+                    f"Congratulazioni {self.applicant.mention}! 🥳\n"
+                    f"Accettata da {interaction.user.mention}.\n\n{role_msg}"
+                ),
+                color=0x2ECC71, timestamp=utcnow(),
+            ).set_footer(text=f"Gestita da {interaction.user}")
+        )
+        with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+            await self.applicant.send(
+                embed=discord.Embed(
+                    title="🎉 Benvenuto nel Team!",
+                    description=f"La tua candidatura per il Team su **{interaction.guild.name}** è stata accettata!\n\n{role_msg}",
+                    color=0x2ECC71, timestamp=utcnow(),
+                )
+            )
+        await asyncio.sleep(5)
+        ticket = await get_ticket(self.channel.id)
+        if ticket and ticket["status"] == "open":
+            await close_ticket(self.channel, interaction.user, interaction.guild, reason="Candidatura team accettata")
+
+    @discord.ui.button(label="❌ RIFIUTA", style=discord.ButtonStyle.danger, custom_id="join_team_reject_v17")
+    async def reject_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check_perm(interaction) or self._decided:
+            if self._decided:
+                await interaction.response.send_message("⚠️ Già gestita.", ephemeral=True)
+            return
+        self._decided = True
+
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(view=self)
+
+        await self.channel.send(
+            embed=discord.Embed(
+                title="❌ Candidatura Rifiutata",
+                description=(
+                    f"Ci dispiace {self.applicant.mention}, la tua candidatura per il team è stata rifiutata da {interaction.user.mention}."
+                ),
+                color=0xE74C3C, timestamp=utcnow(),
+            ).set_footer(text=f"Gestita da {interaction.user}")
+        )
+        with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+            await self.applicant.send(
+                embed=discord.Embed(
+                    title="❌ Candidatura Team Rifiutata",
+                    description=f"La tua candidatura per il team su **{interaction.guild.name}** è stata rifiutata.",
+                    color=0xE74C3C, timestamp=utcnow(),
+                )
+            )
+        await asyncio.sleep(3)
+        ticket = await get_ticket(self.channel.id)
+        if ticket and ticket["status"] == "open":
+            await close_ticket(self.channel, interaction.user, interaction.guild, reason="Candidatura team rifiutata")
+
+
+class JoinTeamStartView(discord.ui.View):
+    def __init__(self, applicant: discord.Member | discord.User, channel: discord.TextChannel):
+        super().__init__(timeout=3600)
+        self.applicant = applicant
+        self.channel   = channel
+        self._used     = False
+
+    @discord.ui.button(
+        label="🎮 Compila Candidatura Team",
+        style=discord.ButtonStyle.green,
+        custom_id="join_team_start_v17",
+    )
+    async def start_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.applicant.id:
+            return await interaction.response.send_message(
+                "❌ Solo il candidato può compilare questo form.", ephemeral=True
+            )
+        if self._used:
+            return await interaction.response.send_message("⚠️ Hai già compilato la candidatura.", ephemeral=True)
+        self._used      = True
+        button.disabled = True
+        button.label    = "✅ Candidatura Inviata"
+        with contextlib.suppress(discord.HTTPException):
+            await interaction.message.edit(view=self)
+        member = interaction.guild.get_member(self.applicant.id)
+        if not member:
+            return await interaction.response.send_message("❌ Impossibile identificarti.", ephemeral=True)
+        await interaction.response.send_modal(JoinTeamModal(channel=self.channel, applicant=member))
+
+    async def on_timeout(self) -> None:
+        for item in self.children:
+            item.disabled = True
+
+
 class PartnershipModal(discord.ui.Modal, title="🤝 Richiesta di Partnership"):
     server_name  = discord.ui.TextInput(label="Nome Server/Progetto",                           min_length=3,  max_length=100)
     invite_link  = discord.ui.TextInput(label="Link Invito / Sito Web",                         min_length=10, max_length=200)
@@ -2231,13 +2433,21 @@ class TicketModal(discord.ui.Modal):
             overwrites[staff_role] = discord.PermissionOverwrite(
                 read_messages=True, send_messages=True, manage_messages=True, attach_files=True,
             )
+
         if self.categoria == "Candidatura Staff":
             admin_role = guild.get_role(Config.ROLE_ADMIN_ID)
             if admin_role and admin_role not in overwrites:
                 overwrites[admin_role] = discord.PermissionOverwrite(
                     read_messages=True, send_messages=True, manage_messages=True, attach_files=True,
                 )
+        if self.categoria == "Unisciti al Team":
+            team_role_staff = guild.get_role(Config.STAFF_TEAM_ROLE_ID)
+            if team_role_staff and team_role_staff not in overwrites:
+                overwrites[team_role_staff] = discord.PermissionOverwrite(
+                    read_messages=True, send_messages=True, manage_messages=True, attach_files=True,
+                )
         if self.categoria == "Partnership":
+
             partner_mgr = guild.get_role(Config.STAFF_PARTNERSHIP_ROLE_ID)
             if partner_mgr and partner_mgr not in overwrites:
                 overwrites[partner_mgr] = discord.PermissionOverwrite(
@@ -2294,6 +2504,7 @@ class TicketModal(discord.ui.Modal):
                 allowed_mentions=discord.AllowedMentions(roles=True),
             )
 
+
         if self.categoria == "Candidatura Staff":
             await channel.send(
                 embed=discord.Embed(
@@ -2303,7 +2514,17 @@ class TicketModal(discord.ui.Modal):
                 ),
                 view=StaffApplicationStartView(applicant=user, channel=channel),
             )
+        elif self.categoria == "Unisciti al Team":
+            await channel.send(
+                embed=discord.Embed(
+                    title="🎮 Compila la candidatura per il Team",
+                    description=f"{user.mention}, clicca il pulsante per inserire età, motivazione e VIP su MetaMC.",
+                    color=discord.Color.green(), timestamp=utcnow(),
+                ),
+                view=JoinTeamStartView(applicant=user, channel=channel),
+            )
         elif self.categoria == "Partnership":
+
             await channel.send(
                 embed=discord.Embed(
                     title="🤝 Compila la richiesta di Partnership",
@@ -4433,10 +4654,12 @@ class HelpCog(commands.Cog):
                 "title": "🏆 Team",
                 "color": 0x27AE60,
                 "commands": [
-                    ("/add_member",    "Staff Team", "Aggiunge membro al team"),
-                    ("/remove_member", "Staff Team", "Rimuove membro dal team"),
-                    ("/list_members",  "Tutti",      "Lista membri del team"),
-                    ("/mc_lookup",     "Staff Team", "Cerca Discord da nickname MC"),
+                    ("/add_member",                     "Staff Team", "Aggiunge membro al team"),
+                    ("/remove_member",                  "Staff Team", "Rimuove membro dal team"),
+                    ("/list_members",                   "Tutti",      "Lista membri del team"),
+                    ("/mc_lookup",                      "Staff Team", "Cerca Discord da nickname MC"),
+                    ("Ticket categoria Unisciti al Team", "Tutti",      "Apri candidatura per entrare nel team"),
+                    ("Pulsante ACCETTA/RIFIUTA",          "Staff Team", "Accetta/rifiuta la candidatura team"),
                 ],
             },
             {
